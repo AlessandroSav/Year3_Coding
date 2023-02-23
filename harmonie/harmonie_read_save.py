@@ -20,11 +20,10 @@ from glob import glob
 import sys
 from datetime import datetime, timedelta
 from netCDF4 import Dataset
-
-my_source_dir = os.path.abspath('{}/../../../My_source_codes')
+sys.path.insert(1, os.path.abspath('.'))
+my_source_dir = os.path.abspath('{}/../../../../My_source_codes')
 sys.path.append(my_source_dir)
 from My_thermo_fun import *
-
 
 #%%
 domain  = 150               # size of the domain where to average (in km)
@@ -56,6 +55,8 @@ write_dir = os.path.abspath('{}/../../DATA/HARMONIE')+'/'
 # read_dir  = os.path.expanduser('~/net/shared-staff/projects/cmtrace/Data/harmonie_data/'+exp)
 # write_dir = os.path.expanduser('~/net/labdata/alessandro/harmonie_data/'+exp)
 ## running on DelftBlue
+# read_dir = os.path.abspath('../../data/HARMONIE/'+exp)
+# write_dir = read_dir
 
 
 #%%
@@ -87,42 +88,53 @@ def calc_geo_height(ds_,fliplevels=False):
 
 ### Import raw Harmonie data
 # This is too slow... need to find a better way. 
-print("Reading HARMONIE raw outputs.") 
+print("Reading HARMONIE 3D output.") 
 ### 3D fields
 
 ## first open and trim one by one the files saving a small portion 
 ## This becasue it is too heavy to load all files together and then cut the area
-nc_files = []
-EXT = "*_Slev_*.nc"
+nc_files    = []
+all_files = []
+EXT = "*_BES_BES_*.nc"
 for path,subdir,files in os.walk(read_dir):
     for file in glob(os.path.join(path, EXT)):
-        try:
-            nc_data_3d  = xr.open_mfdataset(file, combine='by_coords')
-        except TypeError:
-            nc_data_3d  = xr.open_mfdataset(file)
-        #get rid of useles variables
-        nc_data_3d = nc_data_3d.drop(['Lambert_Conformal','time_bnds'])
-        # select a smaller area 
-        j,i = np.unravel_index(np.sqrt((nc_data_3d.lon-lon_select)**2 + (nc_data_3d.lat-lat_select)**2).argmin(), nc_data_3d.lon.shape)
-        nc_data_3d = nc_data_3d.isel(x=slice(i-buffer,i+buffer),y=slice(j-buffer,j+buffer))
-        # Deaccumulate tendencies 
-        for var in list(nc_data_3d.keys()):
-            if 'dt' in var:
-                print("deaccumulating "+var)
-                nc_data_3d[var] = (nc_data_3d[var].diff('time')) * step**-1  # gives values per second    
-        ## select only lower levels
-        nc_data_3d = nc_data_3d.sel(lev=slice(15,65)) # MAKE THIS SELECTION ONLY WHEN SAVING
-        ## average over the domain
-        harm_clim_avg = nc_data_3d.mean(dim=['x', 'y'])
-        print("saving level "+var)
-        harm_clim_avg.to_netcdf(write_dir+'my_harm_clim_avg_lev_'+var+'.nc')
+        all_files.append(file)
 
-        del harm_clim_avg
-        # free some memory
-        del nc_data_3d
+## open files
+try:
+    nc_data_3d  = xr.open_mfdataset(all_files, combine='by_coords')
+except TypeError:
+    nc_data_3d  = xr.open_mfdataset(all_files)
+#get rid of useles variables
+nc_data_3d = nc_data_3d.drop(['Lambert_Conformal','time_bnds'])
+# select a smaller area 
+j,i = np.unravel_index(np.sqrt((nc_data_3d.lon-lon_select)**2 + (nc_data_3d.lat-lat_select)**2).argmin(), nc_data_3d.lon.shape)
+nc_data_3d = nc_data_3d.isel(x=slice(i-buffer,i+buffer),y=slice(j-buffer,j+buffer))
+# Deaccumulate tendencies 
+for var in list(nc_data_3d.keys()):
+    if 'dt' in var:
+        print("deaccumulating "+var)
+        nc_data_3d[var] = (nc_data_3d[var].diff('time')) * step**-1  # gives values per second    
+## select only lower levels
+nc_data_3d = nc_data_3d.sel(lev=slice(15,65)) # MAKE THIS SELECTION ONLY WHEN SAVING
+## average over the domain
+harm_clim_avg = nc_data_3d.mean(dim=['x', 'y'])
+##### save #####
+# print("saving level "+var)
+# harm_clim_avg.to_netcdf(write_dir+exp[16::]+'_avg_lev_'+var+'.nc')
+print("saving averaged level profiles")
+harm_clim_avg.to_netcdf(write_dir+exp[16::]+'_avg_lev_all.nc')
+
+del harm_clim_avg
+# free some memory
+del nc_data_3d
+
+
+
+#%%
 
 ## now open all trimmed files together and save as one netcdf
-EXT = 'my_harm_clim_avg_lev_*.nc'   
+EXT = exp[16::]+'_avg_lev_*.nc'   
 for file in glob(os.path.join(write_dir, EXT)):
     nc_files.append(file)
 try:
@@ -131,7 +143,8 @@ except TypeError:
     harm_clim_avg  = xr.open_mfdataset(nc_files)
 
 # save at it should be for creating LES forcings
-harm_clim_avg.to_netcdf(write_dir+'my_harm_for_LES_forcing.nc')
+print("saving averaged level profiles")
+harm_clim_avg.to_netcdf(write_dir+exp[16::]+'_avg_lev_all.nc')
 
 # rename variables
 harm_clim_avg        = harm_clim_avg.rename({'ta':'T','hus':'qt','lev':'level','va':'v','ua':'u'})
@@ -154,9 +167,9 @@ harm_clim_avg = harm_clim_avg.rename({'z':'geo_height'})
 harm_clim_avg = harm_clim_avg.rename({'level':'z'})
 harm_clim_avg["z"] = (z_ref-z_ref.min()).values
 harm_clim_avg['z'] = harm_clim_avg.z.assign_attrs(units='m',long_name='Height')
-print("saving my_harm_clim_avg_profiles")
-harm_clim_avg.to_netcdf(write_dir+'my_harm_clim_avg.nc')
-
+print("saving averaged heigth profiles")
+harm_clim_avg.to_netcdf(write_dir+exp[16::]+'_avg_z_all.nc')
+del harm_clim_avg
 
 #%%         # Read cloud fraction
 print("Reading 2D HARMONIE data.") 
@@ -169,8 +182,9 @@ try:
     nc_data_cl  = xr.open_mfdataset(nc_files, combine='by_coords')
 except TypeError:
     nc_data_cl  = xr.open_mfdataset(nc_files)
-nc_data_cl.to_netcdf(write_dir+'my_harm_clim_2D.nc')
+nc_data_cl.to_netcdf(write_dir+exp[16::]+'_2D.nc')
 #%%         # Read in surface (or first level) outputs 
+print("Reading surface HARMONIE data.") 
 nc_files = []
 for EXT in ['hfss*','hfls*','cape*','ps*','ts*','tos*']:
     for file in glob(os.path.join(harmonie_dir, EXT)):
@@ -190,14 +204,14 @@ for var in list(nc_data_surf.keys()):
     nc_data_surf[var] = (nc_data_surf[var].diff('time')) * step**-1  # gives values per second
 # ## average over the domain
 # nc_data_surf = nc_data_surf.mean(dim=['x', 'y'])
-print("saving my_harm_clim_surf")
-nc_data_surf.to_netcdf(write_dir+'my_harm_clim_surf.nc')
+print("saving surface variables")
+nc_data_surf.to_netcdf(write_dir+exp[16::]+'_surf.nc')
 
 
+#%%
+print('End.')
 
-
-
-
+#%%
 # # ##### calculate pressure #####
 
 # # ahalf= (pd.read_csv('/nfs/home/users/theeuwes/work/DALES_runs/ecf/scr/data/H43_65lev.txt',
