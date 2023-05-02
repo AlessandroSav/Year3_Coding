@@ -31,7 +31,7 @@ params = {'legend.fontsize': 'large',
          'figure.titlesize':20}
 pylab.rcParams.update(params)
 
-my_source_dir = os.path.abspath('{}/../../../My_source_codes')
+my_source_dir = os.path.abspath('{}/../../../../My_source_codes')
 sys.path.append(my_source_dir)
 from My_thermo_fun import *
 
@@ -138,20 +138,20 @@ def calc_geo_height(ds_,fliplevels=False):
 nc_data={}
 nc_data_cl={}
 for exp in ha_exps:
-    # nc_files = []
-    # for EXT in ['hfss*','hfls*']:
-    #     for file in glob(os.path.join(harmonie_dir+exp+'/', EXT)):
-    #         # if harmonie_time_to_keep in file:
-    #         #     nc_files.append(file)
-    #         nc_files.append(file)
-    # nc_data[exp]  = xr.open_mfdataset(nc_files, combine='by_coords')
+    nc_files = []
+    for EXT in ['hfss*','hfls*']:
+        for file in glob(os.path.join(harmonie_dir+exp+'/', EXT)):
+            # if harmonie_time_to_keep in file:
+            #     nc_files.append(file)
+            nc_files.append(file)
+    nc_data[exp]  = xr.open_mfdataset(nc_files, combine='by_coords')
     
-    # ## cut domain smaller based on buffer
-    # j,i = np.unravel_index(np.sqrt((nc_data[exp].lon-lon_select)**2 + (nc_data[exp].lat-lat_select)**2).argmin(), nc_data[exp].lon.shape)
-    # nc_data[exp] = nc_data[exp].isel(x=slice(i-buffer,i+buffer),y=slice(j-buffer,j+buffer))
+    ## cut domain smaller based on buffer
+    j,i = np.unravel_index(np.sqrt((nc_data[exp].lon-lon_select)**2 + (nc_data[exp].lat-lat_select)**2).argmin(), nc_data[exp].lon.shape)
+    nc_data[exp] = nc_data[exp].isel(x=slice(i-buffer,i+buffer),y=slice(j-buffer,j+buffer))
     
-    # for var in list(['hfss','hfls']):
-    #      nc_data[exp][var] = (nc_data[exp][var].diff('time')) * 3600**-1  # gives values per second   
+    for var in list(['hfss','hfls']):
+          nc_data[exp][var] = (nc_data[exp][var].diff('time')) * 3600**-1  # gives values per second   
 
 
 

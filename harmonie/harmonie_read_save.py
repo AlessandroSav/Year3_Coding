@@ -47,7 +47,7 @@ harmonie_time_to_keep = '202002010000-'
 
 ## running on Local
 read_dir  = '/Users/acmsavazzi/Documents/WORK/PhD_Year2/DATA/HARMONIE/'+exp+'/'
-write_dir = os.path.abspath('{}/../../DATA/HARMONIE')+'/'
+write_dir = os.path.abspath('{}/../../../DATA/HARMONIE')+'/'
 ## runnin with mounted staff-umbrella
 # read_dir  = os.path.abspath('/Users/acmsavazzi/Documents/Mount1/harmonie_data/Eurec4a_climrun/')+'/'
 # write_dir = os.path.abspath('{}/../../DATA/HARMONIE')+'/'
