@@ -19,12 +19,16 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib import cm
 import sys
+import geopy
+import geopy.distance
 from datetime import datetime, timedelta
 from netCDF4 import Dataset
 from scipy import ndimage as ndi
 my_source_dir = os.path.abspath('{}/../../../../My_source_codes')
 sys.path.append(my_source_dir)
 from My_thermo_fun import *
+sys.path.insert(1, '/Users/acmsavazzi/Documents/WORK/PhD_Year2/Coding/Scale_separation/')
+from functions import *
 
 import cartopy
 import cartopy.crs as ccrs
@@ -64,30 +68,57 @@ def lighten_color(color, amount=0.5):
         c = color
     c = colorsys.rgb_to_hls(*mc.to_rgb(c))
     return colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
+
+def convert_rain_intensity(intensity_kg_kg):
+    density_water_vapor = 0.9  # kg/m³
+    conversion_factor = 1000 / 3600  # Conversion from kg/m³ to g/m³ and seconds to hours
+
+    intensity_mm_hour = intensity_kg_kg * density_water_vapor * conversion_factor
+    return intensity_mm_hour
 #%% initial 
 dt          = 75                 # model  timestep [seconds]
 step        = 3600             # output timestep [seconds]
 domain_name = 'BES'
 lat_select  = 13.2806    # HALO center 
 lon_select  = -57.7559   # HALO center 
-domain      = 200            # km
-srt_time   = np.datetime64('2020-01-03T00:30')
-end_time   = np.datetime64('2020-01-29T23')
+
+domain_sml  = 200            # km
+domain_med  = 400
+grid        = 2.5 # kmm
+srt_time    = np.datetime64('2020-01-03T00:30')
+end_time    = np.datetime64('2020-01-29T23')
 
 months = ['01',]
 month='0*'
+plot=False
+apply_filter = False
 
-exps = ['noHGTQS_','noHGTQS_noSHAL_','noHGTQS_noUVmix_']
+# exps = ['noHGTQS_','noHGTQS_noSHAL_']
 exps = ['noHGTQS_','noHGTQS_noUVmix_']
-col=['r','g','k']
-col=['k','r']
-sty=['-',':','--']
-sty=['--','-']
+col=['k','r','g']
+# col=['k','r']
+sty=['--','-',':']
+# sty=['--','-']
 
 levels = 'z'      ## decide wether to open files model level (lev) or 
                     ## already interpolate to height (z)
 my_harm_dir     = '/Users/acmsavazzi/Documents/WORK/PhD_Year3/DATA/HARMONIE/'
 ifs_dir         = '/Users/acmsavazzi/Documents/WORK/Research/MyData/'
+
+##medium domain
+buffer_sml = int(domain_sml/(2*grid)) 
+buffer_med = int(domain_med/(2*grid))  
+
+# 100km to the east 
+Dx = geopy.distance.distance(kilometers = 100)
+new_centre = Dx.destination(point=[lat_select,lon_select], bearing=90)
+Dx = geopy.distance.distance(kilometers = 200)
+Dy = geopy.distance.distance(kilometers = 200)
+lat_max = Dy.destination(point=new_centre, bearing=0)
+lat_min = Dy.destination(point=new_centre, bearing=180)
+lon_max = Dx.destination(point=new_centre, bearing=270)
+lon_min = Dx.destination(point=new_centre, bearing=90)
+medium_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
 #%%
 print("Reading ERA5.") 
 era5=xr.open_mfdataset(ifs_dir+'My_ds_ifs_ERA5.nc',chunks={'Date':-1})
@@ -103,8 +134,10 @@ print("Reading HARMONIE.")
 harm2d={}
 harm3d={}
 harm_srf={}
+harm_srf_sml = {}
+harm_srf_med  = {}
 for exp in exps:
-    file2d = my_harm_dir+exp[:-1]+'/'+exp+month+'_avg'+str(domain)+'*'+levels+'*.nc'
+    file2d = my_harm_dir+exp[:-1]+'/'+exp+month+'_avg'+str(domain_sml)+'*'+levels+'*.nc'
     harm2d[exp] = xr.open_mfdataset(file2d, combine='by_coords',chunks={'time':-1})
     harm2d[exp]['z'] = np.sort(harm2d[exp]['z'].values)
     harm2d[exp] = harm2d[exp].sortby('z')
@@ -120,7 +153,7 @@ for exp in exps:
     harm2d[exp].time.attrs["units"] = "Local Time"
     
     ####################################
-    file3d = my_harm_dir+exp[:-1]+'/'+exp+month+'_3d_'+str(domain)+'*'+levels+'*.nc'
+    file3d = my_harm_dir+exp[:-1]+'/'+exp+month+'_3d_'+str(domain_sml)+'*'+levels+'*.nc'
     harm3d[exp] = xr.open_mfdataset(file3d, combine='by_coords',chunks={'time':-1})
     harm3d[exp] = harm3d[exp].drop_duplicates(dim="time", keep="first")
     ####################################    
@@ -135,7 +168,8 @@ for exp in exps:
     harm3d[exp].time.attrs["units"] = "Local Time"
 
     # read surface 2d fields
-    file_srf = my_harm_dir+exp[:-1]+'/'+exp+month+'_2d_'+str(domain)+'.nc'
+    # file_srf = my_harm_dir+exp[:-1]+'/'+exp+month+'_2d_'+str(domain_sml)+'.nc'
+    file_srf = my_harm_dir+exp[:-1]+'/'+exp+month+'_2d_1100.nc'
     harm_srf[exp] = xr.open_mfdataset(file_srf, combine='by_coords')
     harm_srf[exp]['time'] = np.sort(harm_srf[exp]['time'].values)
     # drop duplicate hour between the 2 months 
@@ -146,17 +180,37 @@ for exp in exps:
     harm_srf[exp]['time'] = harm_srf[exp]['time'] - np.timedelta64(4, 'h')
     harm_srf[exp].time.attrs["units"] = "Local Time"
     
+    
+    # select a smaller area 
+    j,i = np.unravel_index(np.sqrt((harm_srf[exp].lon-lon_select)**2 + (harm_srf[exp].lat-lat_select)**2).argmin(), harm_srf[exp].lon.shape)
+    harm_srf_sml[exp] = harm_srf[exp].isel(x=slice(i-buffer_sml,i+buffer_sml),y=slice(j-buffer_sml,j+buffer_sml))
+    # select a medium area 
+    j,i = np.unravel_index(np.sqrt((harm_srf[exp].lon-new_centre[1])**2 + (harm_srf[exp].lat-lat_select)**2).argmin(), harm_srf[exp].lon.shape)
+    harm_srf_med[exp] = harm_srf[exp].isel(x=slice(i-buffer_med,i+buffer_med),y=slice(j-buffer_med,j+buffer_med))
+    
+    #get rid of useles variables
+    if 'Lambert_Conformal' in harm_srf_sml[exp]:
+        harm_srf_sml[exp] = harm_srf_sml[exp].drop(['Lambert_Conformal'])
+        harm_srf_med[exp] = harm_srf_med[exp].drop(['Lambert_Conformal'])
+        harm_srf[exp] = harm_srf[exp].drop(['Lambert_Conformal'])
+    if 'time_bnds' in harm_srf_sml[exp]:
+        harm_srf_sml[exp] = harm_srf_sml[exp].drop(['time_bnds'])
+        harm_srf_med[exp] = harm_srf_med[exp].drop(['time_bnds'])
+        harm_srf[exp] = harm_srf[exp].drop(['time_bnds'])
+    
 #%% Import organisation metrics
 ds_org = {}
 for exp in exps:    
     fileorg = my_harm_dir+'df_metrics_'+exp[:-1]+'.h5'    
     ds_org[exp] = pd.read_hdf(fileorg)
     ds_org[exp].index.names = ['time']
+    ds_org[exp] = ds_org[exp].astype(np.float64)
     ds_org[exp] = ds_org[exp].to_xarray()
     ds_org[exp] = ds_org[exp].sel(time=slice(srt_time,end_time))
     # convert to local time
     ds_org[exp]['time'] = ds_org[exp]['time'] - np.timedelta64(4, 'h')
     ds_org[exp].time.attrs["units"] = "Local Time"
+    
 #%%  Define Groups of organisation 
 time_g1={}
 time_g2={}
@@ -204,22 +258,39 @@ for exp in exps:
 
 #%% calculated resolved fluxes
 for exp in exps:
-    for var in ['ua','va','wa']:
+    for var in ['ua','va','wa','hus','ta']:
         harm3d[exp][var+'_p'] = harm3d[exp][var] - harm3d[exp][var].mean(['x','y'])
     
     harm3d[exp]['uw']= harm3d[exp]['ua_p']*harm3d[exp]['wa_p']
     harm3d[exp]['vw']= harm3d[exp]['va_p']*harm3d[exp]['wa_p']
+    harm3d[exp]['tw']= harm3d[exp]['ta_p']*harm3d[exp]['wa_p']
+    harm3d[exp]['qw']= harm3d[exp]['hus_p']*harm3d[exp]['wa_p']
     
     for id_ds, ds in enumerate([harm2d[exp],harm3d[exp]]): 
-        for var in ['u','v']:
-        ## save a variable for total parameterised momentum flux
-            ds[var+'flx_turb'] = ds[var+'flx_turb'].diff('time') * step**-1
-            ds[var+'flx_conv_dry'] = ds[var+'flx_conv_dry'].diff('time') * step**-1
-            if exp == 'noHGTQS_noUVmix_':  # flx_conv_moist is missing in this experiment... why??        
+        if id_ds ==0:
+            vars = ['u','v','Thl','rt']
+        else: 
+            vars = ['u','v']
+        for var in vars:
+            ## save a variable for total parameterised momentum flux
+            if (exp == 'noHGTQS_noUVmix_') & (var in ['Thl','rt']):
+                print('Param. '+var+' fluxes missing in '+exp)
+            elif (exp == 'noHGTQS_noUVmix_') & (var in ['u','v']):
+                #deaccumulate 
+                ds[var+'flx_turb'] = ds[var+'flx_turb'].diff('time') * step**-1
+                ds[var+'flx_conv_dry'] = ds[var+'flx_conv_dry'].diff('time') * step**-1
+                # sum parameterised components 
                 ds[var+'_flx_param_tot']=ds[var+'flx_turb']+\
-                  ds[var+'flx_conv_dry']     
+                                         ds[var+'flx_conv_dry']      
             else:
-                ds[var+'flx_conv_moist'] = ds[var+'flx_conv_moist'].diff('time') * step**-1
+                #deaccumulate 
+                ds[var+'flx_turb'] = ds[var+'flx_turb'].diff('time') * step**-1
+                ds[var+'flx_conv_dry'] = ds[var+'flx_conv_dry'].diff('time') * step**-1
+                if var == 'Thl':
+                    ds[var+'flx_conv_moist'] = ds[var+'flx_conv_mois'].diff('time') * step**-1
+                else:
+                    ds[var+'flx_conv_moist'] = ds[var+'flx_conv_moist'].diff('time') * step**-1
+                # sum parameterised components 
                 ds[var+'_flx_param_tot']=ds[var+'flx_turb']+\
                   ds[var+'flx_conv_moist']+\
                   ds[var+'flx_conv_dry']
@@ -242,9 +313,11 @@ for exp in exps:
     harm3d[exp][var+'_top_std'] = harm3d[exp][var+'_top'].std(['x','y'])
     
     ### Calculate variances 
-    harm3d[exp]['u_var'] = harm3d[exp]['ua_p']**2
-    harm3d[exp]['v_var'] = harm3d[exp]['va_p']**2
-    harm3d[exp]['w_var'] = harm3d[exp]['wa_p']**2
+    harm3d[exp]['u_var'] = harm3d[exp]['ua_p'] **2
+    harm3d[exp]['v_var'] = harm3d[exp]['va_p'] **2
+    harm3d[exp]['w_var'] = harm3d[exp]['wa_p'] **2
+    harm3d[exp]['q_var'] = harm3d[exp]['hus_p']**2
+    harm3d[exp]['t_var'] = harm3d[exp]['ta_p'] **2
     
     ### Calculate TKE 
     harm3d[exp]['tke']=\
@@ -253,20 +326,102 @@ for exp in exps:
         harm3d[exp]['ua_p']**2
         
     ### calculate cloud cover below 4km
+    harm3d[exp]['cc_4km']  = (harm3d[exp]['cl'].sel(z=slice(0,4000))>0.5).any(dim='z') *1
     harm2d[exp]['cc_4km'] = \
     ((harm3d[exp]['cl'].sel(z=slice(0,4000))>0.5).any(dim='z').\
     sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
+        
+    ### calculate cloud cover below 2.5km (this is to check with standard output of low cloud cover CLL)
+    harm3d[exp]['cc_2_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,2500))>0.5).any(dim='z') *1
+    harm2d[exp]['cc_2_5km'] = \
+    ((harm3d[exp]['cl'].sel(z=slice(0,2500))>0.5).any(dim='z').\
+    sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
+
+    ### calculate cloud cover below 1.5km ()
+    harm3d[exp]['cc_1_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,1500))>0.5).any(dim='z') *1
+    harm2d[exp]['cc_1_5km'] = \
+    ((harm3d[exp]['cl'].sel(z=slice(0,1500))>0.5).any(dim='z').\
+    sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
+    ### calculate cloud cover below 1km ()
+    harm3d[exp]['cc_1km']  = (harm3d[exp]['cl'].sel(z=slice(0,1000))>0.5).any(dim='z') *1
+    harm2d[exp]['cc_1km'] = \
+    ((harm3d[exp]['cl'].sel(z=slice(0,1000))>0.5).any(dim='z').\
+    sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
+        
+    ### calculate cloud cover between 1 and  4km
+    harm3d[exp]['cc_1to4km'] = harm3d[exp]['cc_4km'] - harm3d[exp]['cc_1km']
+    harm2d[exp]['cc_1to4km'] = harm3d[exp]['cc_1to4km'].sum(dim=('x','y'))/\
+                                (len(harm3d[exp].x)*len(harm3d[exp].y))
+    ### calculate cloud cover between 1.5 and  4km
+    harm3d[exp]['cc_1_5to4km'] = harm3d[exp]['cc_4km'] - harm3d[exp]['cc_1_5km']
+    harm2d[exp]['cc_1_5to4km'] = harm3d[exp]['cc_1_5to4km'].sum(dim=('x','y'))/\
+                                (len(harm3d[exp].x)*len(harm3d[exp].y))
+        
         
     ## calculate th
     harm3d[exp]['thv']= calc_th(calc_Tv(harm3d[exp]['ta'],harm3d[exp]['p'],\
                        calc_rh(harm3d[exp]['p'],harm3d[exp]['hus'],harm3d[exp]['ta'])),\
                                harm3d[exp]['p'])
-        
+    ################################  
     ## buoyancy
     harm3d[exp]['buoy'] = calc_buoy(harm3d[exp]['thv'],harm3d[exp]['thv'].mean(dim=('x','y')))
+    ################################
     
+    ## total momentum flux tau
+    harm3d[exp]['tau_res'] = np.sqrt(harm3d[exp]['uw']**2 + harm3d[exp]['vw']**2)
+    harm3d[exp]['tau_par'] = np.sqrt(harm3d[exp]['u_flx_param_tot']**2 + \
+                                     harm3d[exp]['v_flx_param_tot']**2 )
+    harm3d[exp]['tau_turb'] = np.sqrt(harm3d[exp]['uflx_turb']**2 + \
+                                     harm3d[exp]['vflx_turb']**2 )
+    if exp == 'noHGTQS_':
+        harm3d[exp]['tau_conv'] = np.sqrt((harm3d[exp]['uflx_conv_dry']+\
+                                          harm3d[exp]['uflx_conv_moist'])**2 + \
+                                         (harm3d[exp]['vflx_conv_dry']+\
+                                          harm3d[exp]['vflx_conv_moist'])**2 )
     
+#%% filter fields
+
+if apply_filter:
+    klps = [4]
+    xsize      =  200000 # m
+    harm3d_filter={}
+    for exp in exps:
+        for k in range(len(klps)):
+            print('Processing scale', k+1, '/', len(klps))
+            klp=klps[k]
+            #
+            if klp > 0:
+                f_scale = xsize/(klp*2)  # m
+            elif klp == 0:
+                f_scale = xsize
+            else: print('Warning: Cutoff wavenumber for lw-pass filter smaller than 0.')
+            
+            # Mask for low-pass filtering
+            circ_mask = np.zeros((harm3d[exp].x.size,harm3d[exp].x.size))
+            rad = getRad(circ_mask)
+            circ_mask[rad<=klp] = 1
+            
+            for var in ['ua','va','wa','hus','ta']:
+                 temp = lowPass(harm3d[exp][var+'_p'].values, circ_mask)
+                 temp_1 = lowPass(harm3d[exp][var].values, circ_mask) # here filter the actual wind fields
+                 
+                 if exp in harm3d_filter:
+                     harm3d_filter[exp] = harm3d_filter[exp].assign(xr.Dataset({var+'_pf': (('time','z','x','y'), temp)}))
+                     harm3d_filter[exp] = harm3d_filter[exp].assign(xr.Dataset({var+'_f': (('time','z','x','y'), temp_1)}))
+                 else:                 
+                     harm3d_filter[exp] = xr.Dataset({var+'_pf': (('time', 'z','x','y'), temp)})
+                     harm3d_filter[exp] = xr.Dataset({var+'_f': (('time', 'z','x','y'), temp_1)})
     
+        harm3d_filter[exp] = harm3d_filter[exp].assign_coords(harm3d[exp].coords)
+        # harm3d_filter[exp] = harm3d_filter[exp].expand_dims(dim={"klp": len(klps)})
+        harm3d_filter[exp] = harm3d_filter[exp].assign_coords({"klp":klps})
+        ### Calculate TKE 
+        harm3d_filter[exp]['tke']=\
+            harm3d_filter[exp]['ua_pf']**2+\
+            harm3d_filter[exp]['ua_pf']**2+\
+            harm3d_filter[exp]['ua_pf']**2
+else: 
+    print('Not filtering fields.')
 
 #%% #########   QUESTIONS   #########
 ###DOES THE DISTRIBUTION OF CLOUDS (CLOUD SIZE,UPDRAFTS) DETERMINES THE FLUXES? 
@@ -278,6 +433,9 @@ for exp in exps:
 #############################################################################
 #%%                     ####### PLOT #######
 #############################################################################
+if plot == False:
+    sys.exit("Stopped before plotting.")
+
 print("Plotting.") 
 #%% Cloud cover selecting different heights
 
@@ -296,6 +454,7 @@ plt.legend()
 
 
 #%% Cloud statistics
+### ful time series  
 fig, axs = plt.subplots(3,1,figsize=(19,15))
 for ide, exp in enumerate(exps):
     if exp == 'noHGTQS_':
@@ -303,7 +462,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     for idx,var in enumerate(['mean_length_scale','num_objects','open_sky']):
         if var =='cloud_fraction':
             factor = 1
@@ -329,8 +488,69 @@ for ide, exp in enumerate(exps):
             factor = 1
             title = var
         
-        ds_org[exp][var].groupby('time.hour').mean('time').plot(\
-                    x='hour',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
+        (ds_org[exp][var]-ds_org['noHGTQS_'][var]).plot(\
+                    x='time',ls=sty[ide],ax=axs[idx],lw=1,c=col[ide],label=lab)
+            
+        (ds_org[exp][var]-ds_org['noHGTQS_'][var]).rolling(time=24).mean().plot(\
+                    x='time',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
+        
+            
+        # Fill the area between the vertical lines
+        axs[idx].axvspan(np.datetime64('2020-01-25T00:30'),\
+                         np.datetime64('2020-01-26T00:30'), alpha=0.1, color='grey')
+        axs[idx].axvspan(np.datetime64('2020-01-05T00:30'),\
+                         np.datetime64('2020-01-06T00:30'), alpha=0.1, color='grey')
+        # axs[idx].set_xlim(0,23)
+        axs[idx].set_title(title,fontsize =28)
+        axs[idx].set_ylabel(unit)
+axs[0].set_xlabel('')
+axs[1].set_xlabel('')
+axs[2].set_xlabel('time')
+axs[0].legend(fontsize=21)   
+plt.tight_layout()
+
+#%% cloud statistics 
+## 3 panel plot 
+fig, axs = plt.subplots(3,1,figsize=(19,15))
+for ide, exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    # for idx,var in enumerate(['mean_length_scale','num_objects','open_sky']):
+    for idx,var in enumerate(['mean_length_scale','num_objects','cc']):
+        if var =='cloud_fraction':
+            factor = 1
+            title  = 'Cloud fraction'
+            unit   = r'fraction '
+        elif var =='num_objects':
+            factor = 1
+            title  = 'Number of clouds'
+            unit   = r'number #'
+        elif var =='iorg':
+            factor = 1
+            title  = r'$I_{org}$'
+            unit   = r'$I_{org}$'
+        elif var == 'mean_length_scale':
+            factor = 1
+            title  ='Mean length scale'
+            unit   = r'km'
+        elif var == 'open_sky':
+            factor = 1
+            title  ='Open sky'
+            unit   = r''
+        elif var == 'cc':
+            title  ='Cloud cover'
+            unit   = r''
+        else:
+            factor = 1
+            title = var
+        
+        if var in list(ds_org[exp]):
+            ds_org[exp][var].groupby('time.hour').mean('time').plot(\
+                        x='hour',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
         
         # if var =='cloud_fraction':
         #     # harm_srf[exp].cll.mean(dim=('x','y')).groupby('time.hour').mean('time')\
@@ -338,6 +558,15 @@ for ide, exp in enumerate(exps):
         #     harm3d[exp]['cl'].sel(z=slice(0,6000)).max('z').\
         #         mean(['x','y']).groupby('time.hour').mean('time').\
         #             plot(x='hour',c=col[ide],ls='--',lw=3,ax=axs[idx],label='0 - 6km')
+        
+        
+        if var == 'cc':
+            harm2d[exp]['cc_1_5km'].\
+                groupby('time.hour').mean()\
+                    .plot(x='hour',ax=axs[idx],ls='-',lw=3,c=col[ide])
+            harm2d[exp]['cc_1_5to4km'].\
+                groupby('time.hour').mean()\
+                    .plot(x='hour',ax=axs[idx],ls='--',lw=3,c=col[ide])
             
         # Fill the area between the vertical lines
         axs[idx].axvspan(20, 23, alpha=0.1, color='grey')
@@ -351,6 +580,7 @@ axs[2].set_xlabel('hour LT')
 axs[0].legend(fontsize=21)   
 plt.tight_layout()
 
+var = 'cc_4km'
 ## cloud cover 
 fig, axs = plt.subplots(1,figsize=(19,7))
 for ide, exp in enumerate(exps):
@@ -359,61 +589,93 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
-    harm2d[exp]['cc_4km'].\
+        lab='UVmixOFF'
+    # harm2d[exp][var].\
+    #     groupby('time.hour').mean()\
+    #         .plot(x='hour',ls='-',lw=3,c=col[ide])
+    # plt.axhline(harm2d[exp][var].\
+    #             mean('time'),ls=sty[ide],lw=1,c=col[ide])
+    
+    harm2d[exp]['cc_2_5km'].\
         groupby('time.hour').mean()\
-            .plot(x='hour',ls=sty[ide],lw=3,c=col[ide])
-    plt.axhline(harm2d[exp]['cc_4km'].\
-                mean('time'),ls=sty[ide],lw=1,c=col[ide])
+            .plot(x='hour',ls='--',lw=3,c=col[ide])
 
 # Fill the area between the vertical lines
 axs.axvspan(20, 23, alpha=0.1, color='grey')
 axs.axvspan(0, 6, alpha=0.1, color='grey')
 axs.set_xlim([0,23])
 axs.set_ylabel(r'fraction')
-axs.set_title(r'Cloud cover in the lower 4 km',fontsize=25)
+axs.set_title(r'Cloud cover',fontsize=25)
 axs.set_xlabel(r'hour LT')
 plt.tight_layout()
 
 #%% Surface fluxes and precipitation 
-fig, axs = plt.subplots(3,1,figsize=(19,15))
-for ide, exp in enumerate(exps):
+fig, axs = plt.subplots(3,1,figsize=(18,15))
+for ide, exp in enumerate(exps[:-1]):
     if exp == 'noHGTQS_':
         lab='Control'
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
-    for idx,var in enumerate(['hfls','hfss','pr']):
+        lab='UVmixOFF'
+    for idx,var in enumerate(['cape','hfls','pr']):
+    # for idx,var in enumerate(['ct','cb','cll']):
         
         if var =='pr':
-            factor = 3600
-            titel  = 'Precipitation'
-            unit   = r'$mm \, hour^{-1}$'
+            factor = 3600 *(24/0.0346)
+            title  = 'Precipitation'
+            # unit   = r'$mm \, hour^{-1}$'
+            unit   = r'$W \, m^{-2}$'
         elif var =='hfls':
             factor = 1
-            titel  = 'Latent heat flux'
-            unit   = r'$J \, m^{-2}$'
+            title  = 'Latent heat flux'
+            unit   = r'$W \, m^{-2}$'
         elif var =='hfss':
             factor = 1
-            titel  = 'Sensible heat flux'
-            unit   = r'$J \, m^{-2}$'
-        else: factor =1
-        (factor*harm_srf[exp][var]).mean(dim=('x','y')).groupby('time.hour').mean('time')\
-                .plot(x='hour',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
-        axs[idx].axhline((factor*harm_srf[exp][var]).mean(dim=('x','y')).mean('time')\
+            title  = 'Sensible heat flux'
+            unit   = r'$W \, m^{-2}$'
+        elif var =='cape':
+            factor = 1
+            title  = 'CAPE'
+            unit   = r'$J \, kg^{-1}$'
+        else: 
+            factor =1
+            title =  var
+            unit = '?'
+        
+        ## cropped 200km
+        # (factor*harm_srf_200[exp][var]).mean(dim=('x','y')).groupby('time.hour').mean('time')\
+        #         .plot(x='hour',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
+        # axs[idx].axhline((factor*harm_srf_200[exp][var]).mean(dim=('x','y')).mean('time')\
+        #         ,ls='-',lw=0.5,c=col[ide])
+        # ## new cropped 200km
+        # (factor*harm_srf_sml[exp][var]).mean(dim=('x','y')).groupby('time.hour').mean('time')\
+        #         .plot(x='hour',ls='-',ax=axs[idx],lw=2,c=col[ide],label=lab)
+        # axs[idx].axhline((factor*harm_srf_sml[exp][var]).mean(dim=('x','y')).mean('time')\
+        #         ,ls='-.',lw=1,c=col[ide])
+        ## new cropped 400
+        (factor*harm_srf_med[exp][var]).mean(dim=('x','y')).groupby('time.hour').mean('time')\
+                .plot(x='hour',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
+        axs[idx].axhline((factor*harm_srf_med[exp][var]).mean(dim=('x','y')).mean('time')\
                 ,ls=sty[ide],lw=1,c=col[ide])
+        ## full domain 
+        # (factor*harm_srf[exp][var]).mean(dim=('x','y')).groupby('time.hour').mean('time')\
+        #         .plot(x='hour',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
+        # axs[idx].axhline((factor*harm_srf[exp][var]).mean(dim=('x','y')).mean('time')\
+        #         ,ls=sty[ide],lw=1,c=col[ide])
             
         # Fill the area between the vertical lines
         axs[idx].axvspan(20, 23, alpha=0.1, color='grey')
         axs[idx].axvspan(0, 6, alpha=0.1, color='grey')
         axs[idx].set_xlim(0,23)
-        axs[idx].set_title(titel,fontsize =23)
+        axs[idx].set_title(title,fontsize =28)
         axs[idx].set_ylabel(unit)
 axs[0].set_xlabel('')
 axs[1].set_xlabel('')
 axs[2].set_xlabel('hour LT')
-axs[0].legend(fontsize=21)   
+axs[1].set_ylim(185,237)
+axs[2].set_ylim(9,62)
+axs[0].legend(fontsize=23)   
 plt.tight_layout()
 #%% PDF of vertical velocity 
 level = [0,100]
@@ -426,7 +688,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     # Flatten the multidimensional array into a 1D array
     temp = harm3d[exp][var].sel(time=time_g1[group][exp]).sel(z=slice(level[0],level[1])).mean('z').values.ravel()
     plt.boxplot(temp,positions=[ide+1],labels=[lab+'_D'], showfliers=False,showmeans=True,widths=[0.5])
@@ -449,8 +711,59 @@ plt.ylabel('Vertical velocity '+var)
 #     plt.axvline(pd.to_datetime('2020-02-02', format = '%Y-%m-%d'),c='k',lw=1)
 #     plt.axvline(pd.to_datetime('2020-02-10T12', format = '%Y-%m-%dT%H'),c='k',lw=1)
 #     plt.title(exp)
+#%%  calculate tendencies from wind components
+##for Louise 
+exp= 'noHGTQS_'
+for var in ['u','v']:
+    # harm3d[exp][var+'_tend']=-harm3d[exp][var+'w'].differentiate(coord='z')
+    # harm2d[exp][var+'_tend'] = harm3d[exp][var+'_tend'].mean(('x','y'))
+
+
+    harm2d[exp][var+'w'] = harm3d[exp][var+'w'].mean(('x','y'))
+    harm2d[exp][var+'_tend_diftime'] = harm2d[exp][var].diff('time')
+    
+    harm2d[exp][var+'_tend_diftime_'] = -(harm3d[exp][var+'a']*harm3d[exp]['wa']).differentiate(coord='z').mean(('x','y'))
+
+
+    harm3d_filter[exp][var+'_tend'] = harm3d_filter[exp][var+'a_f'].diff('time')
+#%% for Louise 
+layer=[0,200]
+
+fig, axs = plt.subplots(2,1,figsize=(19,15))
+exp = 'noHGTQS_'
+lab='Control'
+h_clim_to_plot = harm2d[exp].sel(z=slice(layer[0],layer[1])).mean('z')
+for idx,var in enumerate(['u','v']):
+    ## HARMONIE cy43 clim
+    ((h_clim_to_plot['dt'+var+'_dyn']+h_clim_to_plot['dt'+var+'_phy'])*step)\
+        .groupby(h_clim_to_plot.time.dt.hour).mean().\
+            plot(c=col[ide],ls='-',lw=3,label=lab+': Tot',ax=axs[idx])
+    (h_clim_to_plot*step).groupby(h_clim_to_plot.time.dt.hour).mean()\
+        ['dt'+var+'_dyn'].\
+            plot(c=col[ide],ls=':',lw=3,label=lab+': Dyn',ax=axs[idx])
+
+
+    ## calculated tendencies
+    # (harm2d[exp][var+'_tend']*step).groupby('time.hour').mean()\
+    #     .sel(z=slice(layer[0],layer[1])).mean('z').plot(ax=axs[idx])
+        
+        
+    (harm2d[exp][var+'_tend_diftime']).groupby('time.hour').mean()\
+        .sel(z=slice(layer[0],layer[1])).mean('z').plot(ax=axs[idx])
+        
+    (harm2d[exp][var+'_tend_diftime_']*step).groupby('time.hour').mean()\
+        .sel(z=slice(layer[0],layer[1])).mean('z').plot(ax=axs[idx])
+    
+    
+    
+    axs[idx].set_title(var+' direction',fontsize=25)
+    axs[idx].axhline(0,c='k',lw=0.5)
+plt.legend(['Total','Resolved','Parameterised'],fontsize=20)
+plt.tight_layout()
+
+
 #%% Tendency evolution over the day 
-layer=[0,500]
+layer=[0,200]
 var='u'
 # for exp in exps:
 #     ## diurnal cycle
@@ -473,7 +786,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     h_clim_to_plot = harm2d[exp].sel(z=slice(layer[0],layer[1])).mean('z')
     for idx,var in enumerate(['u','v']):
         ## HARMONIE cy43 clim
@@ -486,6 +799,9 @@ for ide, exp in enumerate(exps):
         (h_clim_to_plot*step).groupby(h_clim_to_plot.time.dt.hour).mean()\
             ['dt'+var+'_phy'].\
                 plot(c=col[ide],ls='-.',lw=3,label=lab+': Phy',ax=axs[idx]) 
+                
+        
+        
         axs[idx].set_title(var+' direction',fontsize=25)
         axs[idx].axhline(0,c='k',lw=0.5)
 plt.legend(['Total','Resolved','Parameterised'],fontsize=20)
@@ -501,7 +817,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         ## mean of all 
         (harm2d[exp][var+'_flx_param_tot']+\
             harm3d[exp][var+'w'].mean(['x','y']))\
@@ -525,31 +841,65 @@ axs[0,1].set_xlabel(r'')
 
 axs[0,0].legend(fontsize=21)   
 plt.tight_layout()
-#%% Wind fluxes profiles
+#%% Fluxes profiles
 fig, axs = plt.subplots(1,2,figsize=(13,11))
 for idx,var in enumerate(['u','v']):
     for ide, exp in enumerate(exps):
         if exp == 'noHGTQS_':
             lab='Control'
+            conv  = harm2d[exp][var+'flx_conv_dry'] + harm2d[exp][var+'flx_conv_moist']
+            param = harm2d[exp][var+'_flx_param_tot']
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
+            param = harm2d[exp][var+'_flx_param_tot']
+            conv  = harm2d[exp][var+'flx_conv_dry'] + harm2d[exp][var+'flx_conv_moist']
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
-        resol = harm3d[exp][var+'w'].mean(['x','y'])
-        param = harm2d[exp][var+'_flx_param_tot']
+            lab='UVmixOFF'
+            if var in ['u','v']:
+                param = harm2d[exp][var+'_flx_param_tot']
         
-        ## mean of all 
-        (resol+param)\
-                .mean('time').plot(y='z',\
-                        ls='-',ax=axs[idx],label=lab+' total',lw=3,c=col[ide])  
-        ## parameterised 
-        # param\
+        if var == 'Thl':
+            resol = harm3d[exp]['tw'].mean(['x','y'])
+        elif var == 'rt':
+            resol = harm3d[exp]['qw'].mean(['x','y'])
+        else: 
+            resol = harm3d[exp][var+'w'].mean(['x','y'])
+            # resol = (harm3d[exp][var+'a']*harm3d[exp]['wa']).mean(['x','y'])
+        
+        
+        # ## mean of all 
+        # (resol+param).isel(z=slice(1,-1))\
         #         .mean('time').plot(y='z',\
-        #                 ls='--',ax=axs[idx],label=lab+' param',lw=2,c=col[ide])  
-        ## resolved
-        resol\
-                .mean('time').plot(y='z',\
-                        ls=':',ax=axs[idx],label=lab+' resol',lw=3,c=col[ide])  
+        #                 ls='-',ax=axs[idx],label=lab+' total',lw=3,c=col[ide])  
+        # # # parameterised 
+        # param.isel(z=slice(1,-1))\
+        #         .mean('time').plot(y='z',\
+        #                 ls='--',ax=axs[idx],label=lab+' param',lw=2,c=col[ide]) 
+        ## parameterised convection
+        if exp == 'noHGTQS_':
+            ## mean of all 
+            (resol+param)\
+                    .mean('time').plot(y='z',\
+                            ls='-',ax=axs[idx],label=lab+' total',lw=3,c=col[ide])  
+            param\
+                    .mean('time').plot(y='z',\
+                            ls='--',ax=axs[idx],label=lab+' param',lw=2,c=col[ide]) 
+        # conv\
+        #         .mean('time').plot(y='z',\
+        #                 ls='--',ax=axs[idx],label=lab+' conv.',lw=2,c=col[ide]) 
+        # harm2d[exp][var+'flx_turb']\
+        #         .mean('time').plot(y='z',\
+        #                 ls=':',ax=axs[idx],label=lab+' turb.',lw=2,c=col[ide]) 
+                        
+            # ## total - convection
+            # (resol+param - conv)\
+            #     .mean('time').plot(y='z',\
+            #                 ls='--',ax=axs[idx],label=lab+' conv.',lw=1,c='r') 
+        
+            ## resolved
+            resol\
+                    .mean('time').plot(y='z',\
+                            ls=':',ax=axs[idx],label=lab+' resol.',lw=2,c=col[ide])  
         
         
         # axs[idx].axhline(layer[0],c='grey',lw=0.3)
@@ -559,14 +909,195 @@ for idx,var in enumerate(['u','v']):
         axs[idx].set_xlabel(r'$m^{2} \, s^{-2}$')
         axs[idx].spines['top'].set_visible(False)
         axs[idx].spines['right'].set_visible(False)
+axs[0].set_xlim([-0.02,0.082])
+axs[1].set_xlim([-0.015,0.03])   
+axs[1].set_yticks([]) 
+axs[1].set_ylabel('')
+# axs[0].set_title('Temperature flux',fontsize=26)
+# axs[1].set_title('Humidity flux',fontsize=26)
+axs[0].set_title('Zonal momentum flux',fontsize=25)
+axs[1].set_title('Meridional momentum flux',fontsize=25)
+axs[0].legend(fontsize=21)
+plt.tight_layout()
+#%% Resolved filtered fluxes profiles 
+################ FOR LOUISE ################
+################################################################################
+pltnight = False
+pltday = True
+alltime = False
+
+fig, axs = plt.subplots(1,2,figsize=(13,11))
+for idx,var in enumerate(['u','v']):
+    exp = 'noHGTQS_'
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+        
+    if pltnight:
+        resol  = harm3d[exp][var+'w'].mean(['x','y']).where((harm3d[exp]['time.hour']>= 20) | (harm3d[exp]['time.hour']< 6))
+        up_fi  = (harm3d_filter[exp][var+'a_pf'] * harm3d_filter[exp]['wa_pf']).mean(['x','y']).where((harm3d[exp]['time.hour']>= 20) | (harm3d[exp]['time.hour']< 6))
+    elif pltday:    
+        resol  = harm3d[exp][var+'w'].mean(['x','y']).where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20))
+        up_fi  = (harm3d_filter[exp][var+'a_pf'] * harm3d_filter[exp]['wa_pf']).mean(['x','y']).where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20))
+    elif alltime:
+        resol  = harm3d[exp][var+'w'].mean(['x','y'])
+        up_fi  = (harm3d_filter[exp][var+'a_pf'] * harm3d_filter[exp]['wa_pf']).mean(['x','y'])
+    
+    sub_fi = resol - up_fi
+    
+    ## resolved
+    resol\
+            .mean('time').plot(y='z',\
+                    ls='-',ax=axs[idx],label='Resol.',lw=3,c='k')  
+    up_fi\
+            .mean('time').plot(y='z',\
+                    ls='--',ax=axs[idx],label='>25km',lw=2,c='r')  
+    sub_fi\
+            .mean('time').plot(y='z',\
+                    ls=':',ax=axs[idx],label='<25km',lw=2,c='r')  
+    
+    
+    # axs[idx].axhline(layer[0],c='grey',lw=0.3)
+    # axs[idx].axhline(layer[1],c='grey',lw=0.3)
+    axs[idx].axvline(0,c='grey',lw=0.5)
+    axs[idx].set_ylim([0,4000])
+    axs[idx].set_xlabel(r'$m^{2} \, s^{-2}$')
+    axs[idx].spines['top'].set_visible(False)
+    axs[idx].spines['right'].set_visible(False)
 # axs[0].set_xlim([-10,-0.5])
 # axs[1].set_xlim([-2,-0.7])   
 axs[1].set_yticks([]) 
 axs[1].set_ylabel('')
 axs[0].set_title('Zonal momentum flux',fontsize=25)
 axs[1].set_title('Meridional momentum flux',fontsize=25)
-axs[0].legend(fontsize=25)
+axs[1].legend(fontsize=24)
+#%% 
+#### diurnal cycle of variances 
+layer = [0,200]
+fig, axs = plt.subplots(2,1,figsize=(15,15))
+exp = 'noHGTQS_'
+if exp == 'noHGTQS_':
+    lab='Control'
+    unit = r'$m^2\,s^{-2}$'
+elif exp == 'noHGTQS_noSHAL_':
+    lab='NoShal'
+elif exp == 'noHGTQS_noUVmix_':
+    lab='UVmixOFF'
+for idx,var in enumerate(['u','v']):
+    resol = harm3d[exp][var+'_var'].mean(['x','y'])
+    up_fi = (harm3d_filter[exp][var+'a_pf']**2).mean(['x','y'])
+    sub_fi = resol - up_fi
+        
+    ## resolved
+    resol.sel(z=slice(layer[0],layer[1])).groupby('time.hour').mean(['z','time'])\
+            .plot(x='hour',ls='-',ax=axs[idx],lw=3,c='k',label='Resol.')
+    axs[idx].axhline(resol.sel(z=slice(layer[0],layer[1])).mean(['z','time'])\
+            ,ls=sty[ide],lw=3,c='k')
+    ## upfilter
+    up_fi.sel(z=slice(layer[0],layer[1])).groupby('time.hour').mean(['z','time'])\
+            .plot(x='hour',ls='--',ax=axs[idx],lw=3,c='r',label='>25km')
+    axs[idx].axhline(up_fi.sel(z=slice(layer[0],layer[1])).mean(['z','time'])\
+            ,ls=sty[ide],lw=2,c='r')
+    ## subfilter
+    sub_fi.sel(z=slice(layer[0],layer[1])).groupby('time.hour').mean(['z','time'])\
+            .plot(x='hour',ls=':',ax=axs[idx],lw=3,c='r',label='<25km')
+    axs[idx].axhline(sub_fi.sel(z=slice(layer[0],layer[1])).mean(['z','time'])\
+            ,ls=sty[ide],lw=2,c='r')
+            
+    # Fill the area between the vertical lines
+    axs[idx].axvspan(20, 23, alpha=0.1, color='grey')
+    axs[idx].axvspan(0, 6, alpha=0.1, color='grey')
+    axs[idx].set_xlim(0,23)
+    axs[idx].set_title(var+' variance',fontsize =28)
+    axs[idx].set_ylabel(unit)
+axs[0].set_xlabel('')
+axs[1].set_xlabel('hour LT')
+axs[0].legend(fontsize=23)   
 plt.tight_layout()
+
+################ end plots for Louise ################
+################################################################################
+################################################################################
+#%% total momentum flux tau
+import itertools
+def flip(items, ncol):
+    return itertools.chain(*[items[i::ncol] for i in range(ncol)])
+
+fig, axs = plt.subplots(1,1,figsize=(7,10))
+var = 'tau'
+for ide, exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+        conv  = harm3d[exp][var+'_conv'].mean(['x','y']).isel(z=slice(1,-1))
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    resol = harm3d[exp][var+'_res'].mean(['x','y']).isel(z=slice(1,-1))
+    param = harm3d[exp][var+'_par'].mean(['x','y']).isel(z=slice(1,-1))
+    turb  = harm3d[exp][var+'_turb'].mean(['x','y']).isel(z=slice(1,-1))
+    
+    
+    
+    ## mean of all 
+    (resol+param)\
+            .mean('time').plot(y='z',\
+                    ls='-',label=lab+' total',lw=3,c=col[ide])  
+    ## resolved
+    resol\
+            .mean('time').plot(y='z',\
+                    ls=':',label=lab+' resol.',lw=3,c=col[ide])  
+    
+    ## parameterised 
+    param\
+            .mean('time').plot(y='z',\
+                    ls='--',label=lab+' param.',lw=2,c=col[ide]) 
+    # turb\
+    #         .mean('time').plot(y='z',\
+    #                 ls='--',label=lab+' turb.',lw=2,c=col[ide]) 
+    # ## parameterised convection
+    # if exp == 'noHGTQS_':
+    #     conv\
+    #             .mean('time').plot(y='z',\
+    #                     ls=':',label=lab+' conv.',lw=1.5,c=col[ide]) 
+        # param\
+        #         .mean('time').plot(y='z',\
+        #                 ls='-',label=lab+' param.',lw=2,c=col[ide]) 
+        # turb\
+        #         .mean('time').plot(y='z',\
+        #                 ls='--',label=lab+' turb.',lw=2,c=col[ide]) 
+                    
+        # ## total - convection
+        # (resol+param - conv)\
+        #     .mean('time').plot(y='z',\
+        #                 ls='--',label='tot - conv',lw=3,c='r') 
+    
+
+    
+    # axs[idx].axhline(layer[0],c='grey',lw=0.3)
+    # axs[idx].axhline(layer[1],c='grey',lw=0.3)
+    # axs.axvline(0,c='grey',lw=0.5)
+    axs.set_ylim([0,4000])
+    axs.set_xlabel(r'$m^{2} \, s^{-2}$')
+    axs.spines['top'].set_visible(False)
+    axs.spines['right'].set_visible(False)
+ 
+axs.set_title('Total momentum flux',fontsize=25)
+# axs.set_title('Resolved momentum flux',fontsize=25)
+# axs.set_title('Parameterised momentum flux',fontsize=25)
+
+axs.set_xlim([0,0.091])
+handles, labels = axs.get_legend_handles_labels()
+
+# axs.legend(flip(handles, 2), flip(labels, 2),fontsize=21,loc='upper center',\
+#             frameon=False,bbox_to_anchor=(0.5, -0.1), ncol=2)
+axs.legend(fontsize=19,loc='upper center',\
+            frameon=False,bbox_to_anchor=(0.5, -0.1), ncol=2)
+plt.tight_layout()
+
 
 #%% wind fluxes by group 
 group = 'iorg'
@@ -579,7 +1110,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
             
         resol = harm3d[exp][var+'w'].mean(['x','y'])
         param = harm2d[exp][var+'_flx_param_tot']
@@ -617,7 +1148,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
             
         resol = harm3d[exp][var+'w'].mean(['x','y'])
         param = harm2d[exp][var+'_flx_param_tot']
@@ -670,7 +1201,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
             
         resol = harm3d[exp][var+'w'].mean(['x','y'])
         param = harm2d[exp][var+'_flx_param_tot']
@@ -750,7 +1281,7 @@ step = 3600
 #         elif exp == 'noHGTQS_noSHAL_':
 #             lab='NoShal'
 #         elif exp == 'noHGTQS_noUVmix_':
-#                 lab='NoMom'
+#                 lab='UVmixOFF'
 #         (harm2d[exp][var+'_flx_param_tot'])\
 #                 .groupby('time.hour').mean('time').idxmin('z').plot(\
 #                         ls='-',ax=axs[idx],label=lab+' param',lw=4,c=col[ide])
@@ -775,7 +1306,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
     (harm2d[exp][var+'_flx_param_tot'])\
             .groupby('time.hour').mean('time').plot(x='hour',\
                                     ax=axs[ide],vmin=-0.015,vmax=0.02,\
@@ -803,7 +1334,7 @@ for idx,var in enumerate(['dtu','dtv']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         
         ## mean of all 
         # ((harm2d[exp][var+'_phy'] + harm2d[exp][var+'_dyn'])*step)\
@@ -848,7 +1379,7 @@ for idx,var in enumerate(['dtu','dtv']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         ## mean of all         
         # ((harm2d[exp][var+'_phy'] + harm2d[exp][var+'_dyn'])*step)\
         #     .sel(time=time_g1[group][exp]).mean('time').isel(z=slice(1,-1))\
@@ -905,7 +1436,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         ## mean of all 
         
         # harm3d[exp][var].isel(z=slice(1,-1)).mean(['x','y','time'])\
@@ -948,7 +1479,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         ## mean of all 
         
         # harm3d[exp][var].isel(z=slice(1,-1)).mean(['x','y','time'])\
@@ -981,7 +1512,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     np.sqrt(harm2d[exp]['u']**2 + harm2d[exp]['v']**2).\
         groupby('time.hour').mean().sel(z=slice(layer[0],layer[1])).mean('z')\
             .plot(x='hour',ls=sty[ide],lw=3,c=col[ide])
@@ -1008,7 +1539,7 @@ for idx,var in enumerate(['u','v']):
         elif exp == 'noHGTQS_noSHAL_':
             lab='NoShal'
         elif exp == 'noHGTQS_noUVmix_':
-            lab='NoMom'
+            lab='UVmixOFF'
         ## mean of all         
         harm2d[exp].sel(time=time_g1[group][exp])[var]\
                 .mean('time').plot(y='z',\
@@ -1045,7 +1576,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     deviations = harm3d[exp][var] - harm3d['noHGTQS_'][var].mean(dim=['x','y','time']).interp(z=harm3d[exp].z)
     
     (deviations*1000).isel(z=slice(1,-1)).quantile(0.25,dim=['x','y']).\
@@ -1067,33 +1598,86 @@ harm3d[exp]['rain'].mean(dim=['x','y','time'])
 #%% Plot fluxes for moister and dryer pixels
 
 #%% Liquid water in air
+pltnight = False
+pltday = False
+alltime = True
 fig, axs = plt.subplots(1,3,figsize=(15,10))
-
 for ide, exp in enumerate(exps):
     if exp == 'noHGTQS_':
         lab='Control'
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     
-    harm2d[exp]['cl'].mean('time').plot(y='z',lw=3,ls=sty[ide],\
-                                                c=col[ide],label=lab,ax=axs[0])
+    night_2d = harm2d[exp].where((harm2d[exp]['time.hour']>= 20) | (harm2d[exp]['time.hour']< 6))
+    day_2d = harm2d[exp].where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20))
+    night_3d = harm3d[exp].where((harm3d[exp]['time.hour']>= 20) | (harm3d[exp]['time.hour']< 6))
+    day_3d = harm3d[exp].where((harm3d[exp]['time.hour']>= 6) & (harm3d[exp]['time.hour']< 20))
+    
+    if pltnight:
+        ## night time
+        # cloud fraction  
+        night_2d['cl'].mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[0])
+        # in cloud LWC  
+        (1000*night_2d['clw']/(night_2d['cl'])).where(night_2d['cl']>0.02).mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[1])
+        # delta q  
+        ((night_3d['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
+            mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+    
+    if pltday:
+        ## day time 
+        # cloud fraction  
+        day_2d['cl'].mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[0])
+            # in cloud LWC
+        (1000*day_2d['clw']/(day_2d['cl'])).where(day_2d['cl']>0.02).mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[1])
         
-    (1000*harm2d[exp]['clw']/(harm2d[exp]['cl'])).where(harm2d[exp]['cl']>0.02).mean('time').plot(y='z',lw=3,ls=sty[ide],\
-                                                c=col[ide],label=lab,ax=axs[1])
+        # delta q
+        ((day_3d['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
+            mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+    if alltime:
+        # cloud fraction  
+        harm2d[exp]['cl'].mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[0])
+            # in cloud LWC
+        (1000*harm2d[exp]['clw']/(harm2d[exp]['cl'])).where(harm2d[exp]['cl']>0.02).mean('time').plot(y='z',lw=3,ls=sty[ide],\
+                                                    c=col[ide],label=lab,ax=axs[1])
+        
+        # delta q
+        # ((harm3d[exp]['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
+        #     mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+            
+        # delta t
+        ((harm3d[exp]['ta'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['ta'].mean(dim=['x','y']))).\
+            mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+        
     
+    ## all hours
+    # harm2d[exp]['cl'].mean('time').plot(y='z',lw=3,ls=sty[ide],\
+    #                                             c=col[ide],label=lab,ax=axs[0])
+        
+    # (1000*harm2d[exp]['clw']/(harm2d[exp]['cl'])).where(harm2d[exp]['cl']>0.02).mean('time').plot(y='z',lw=3,ls=sty[ide],\
+    #                                             c=col[ide],label=lab,ax=axs[1])
+        
+    # ((harm3d[exp]['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
+    #     mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+    
+    
+    #########
+    ### old in-cloud LWC attempts 
     # (1000*harm2d[exp]['clw']*(1-harm2d[exp]['cl'])).mean('time').plot(y='z',lw=3,ls=sty[ide],\
     #                                             c=col[ide],ax=axs[1])
-
     # ((1000*harm3d[exp]['rain']).mean(dim=['x','y'])\
     #     /(harm2d[exp]['cl'])).where(harm2d[exp]['cl']>0.02).mean('time').\
     #     plot(y='z',lw=3,ls=sty[ide],c=col[ide],label=lab,ax=axs[2])
     # (1000*harm3d[exp]['rain']).mean(dim=['x','y']).mean('time').\
     #     plot(y='z',lw=3,ls=sty[ide],c=col[ide],label=lab,ax=axs[2])
-        
-    ((harm3d[exp]['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
-        mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+     #########   
+
 
 axs[0].set_ylim([0,4000])
 axs[1].set_ylim([0,4000])
@@ -1108,33 +1692,10 @@ axs[1].set_xlabel(r'Liquid water ($g \, kg^{-1}$)')
 axs[2].set_xlabel(r'$q_t$ ($g \, kg^{-1}$)')
 axs[0].set_title('Cloud fraction',fontsize=30)
 axs[1].set_title('In-cloud LW content',fontsize=30)
-axs[2].set_title(r'$\Delta q_t$ (NoMom - ctrl)',fontsize=30)
+axs[2].set_title(r'$\Delta q_t$ (UVmixOFF - ctrl)',fontsize=30)
+# axs[2].set_title(r'$\Delta q_t$ (NoSHAL - ctrl)',fontsize=30)
 axs[0].legend(fontsize=25)
 plt.tight_layout()
-#%% temporaneo
-var = 'hus'
-plt.figure(figsize=(10,13))
-for ide, exp in enumerate(exps):
-    if exp == 'noHGTQS_':
-        lab='Control'
-    elif exp == 'noHGTQS_noSHAL_':
-        lab='NoShal'
-    elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
-    deviations = harm3d[exp][var] #- harm3d['noHGTQS_'][var].mean(dim=['x','y','time']).interp(z=harm3d[exp].z)
-    
-    (deviations*1000).isel(z=slice(1,-1)).quantile(0.25,dim=['x','y']).\
-        mean('time').plot(y='z',ls='-',c=col[ide],lw=3,label=lab+' dry')
-    (deviations*1000).isel(z=slice(1,-1)).quantile(0.75,dim=['x','y']).\
-        mean('time').plot(y='z',ls='--',c=col[ide],lw=3,label=lab+' moist')
-
-plt.ylim([0,4000])
-plt.axvline(0,c='k',lw=0.5)
-plt.legend(fontsize=25)
-plt.title('Humidity quantiles',fontsize=30)
-plt.tight_layout()
-
-
 
 #%% rain distribution 
 var = 'rain'
@@ -1146,7 +1707,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     (harm3d[exp][var]*1000).where(harm3d[exp][var]>thres).isel(z=1)\
     .plot.hist(bins=500,color=col[ide],histtype=u'step', density=False)
     plt.axvline(harm3d[exp][var].where(harm3d[exp][var]>thres).isel(z=1)\
@@ -1181,7 +1742,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     (harm3d[exp][var]<1500).sum(dim=('x','y')).groupby('time.hour').mean()\
         .plot(color=col[ide],label=lab+'_Sh',lw=3)
     ((harm3d[exp][var]<4000)&(harm3d[exp][var]>2500)).sum(dim=('x','y')).groupby('time.hour').mean()\
@@ -1192,12 +1753,6 @@ plt.title('Cloud top counts for Deeper and Shallower pixels',fontsize=22)
 plt.xlim([0,23])
 plt.tight_layout()  
 #%%
-def convert_rain_intensity(intensity_kg_kg):
-    density_water_vapor = 0.9  # kg/m³
-    conversion_factor = 1000 / 3600  # Conversion from kg/m³ to g/m³ and seconds to hours
-
-    intensity_mm_hour = intensity_kg_kg * density_water_vapor * conversion_factor
-    return intensity_mm_hour
 var = 'rain'
 plt.figure(figsize=(13,8) )
 for ide, exp in enumerate(exps):
@@ -1206,7 +1761,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     rain_rate = convert_rain_intensity(harm3d[exp][var]).mean(dim=('x','y'))  
     rain_rate.sel(z=0).groupby('time.hour').mean()\
         .plot(color=col[ide],label=lab,lw=3)
@@ -1225,7 +1780,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     harm3d[exp][var].plot.hist(bins=4,lw=3, color=col[ide],\
                                histtype=u'step',label=lab, density=True)
 plt.ylabel(r'Distribution of CL top')
@@ -1239,7 +1794,7 @@ plt.tight_layout()
 #     elif exp == 'noHGTQS_noSHAL_':
 #         lab='NoShal'
 #     elif exp == 'noHGTQS_noUVmix_':
-#         lab='NoMom'
+#         lab='UVmixOFF'
 #     harm3d[exp][var].plot.hist(bins=40,lw=3, color=col[ide],\
 #                                               histtype=u'step',label=lab, density=True)
 #     plt.axvline(harm3d[exp][var]\
@@ -1262,7 +1817,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab='NoMom'
+        lab='UVmixOFF'
     lwp = harm3d[exp]['hus'].sel(z=slice(0,5000)).sum('z')
     lwp_deviation = lwp -lwp.mean(dim=('x','y'))
     shear = (harm3d[exp][var].sel(z=2000, method='nearest') - \
@@ -1288,84 +1843,96 @@ plt.tight_layout()
 
 
 
-harm3d[exp][var]
-
 
 #%% aereal snapshot
-import geopy
-import geopy.distance
-idtime= np.datetime64('2020-01-10T19')
-plt.figure()
-harm3d[exp].sel(time=idtime).cl.sel(z=slice(0,3500)).sum('z').plot()
+idtime= np.datetime64('2020-01-25T19')
+var= 'cc_2_5km'
+# var= 'cll'
+
+
+fig, axs = plt.subplots(1,2,figsize=(15,7))
+for ide,exp in enumerate(exps[:-1]):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    harm3d[exp].sel(time=idtime)[var].plot(ax=axs[ide],cmap='Blues_r')
+    # (harm_srf_sml[exp].sel(time=idtime)[var]).plot(ax=axs[ide],cmap='Blues_r',vmax=0.9)
+    # (harm_srf_sml[exp].sel(time=idtime)[var]>0.5).plot(ax=axs[ide],cmap='Blues_r')
+    axs[ide].set_title(lab,fontsize =28)
+axs[1].set_ylabel('')
+axs[1].set_yticks([])
+plt.suptitle(idtime,fontsize =28)
 ###
-plt.figure()
-harm3d[exp].sel(time=idtime).vw.sel(z=slice(0,1500)).mean('z').plot()
+# plt.figure()
+# harm3d[exp].sel(time=idtime).vw.sel(z=slice(0,1500)).mean('z').plot()
 
-
+#%% plot domains 
 ds_pr = xr.open_mfdataset('/Users/acmsavazzi/Documents/WORK/PhD_Year3/DATA/HARMONIE/noHGTQS/pr_his_BES_HA43h22tg3_clim_noHGTQS_1hr_202001110000-202001210000.nc')
 var = 'pr'
 ii=10
 
-les_centre = [13.3,-54.01]
-##medium
-Dx = geopy.distance.distance(kilometers = 200)
-Dy = geopy.distance.distance(kilometers = 200)
-lat_max = Dy.destination(point=les_centre, bearing=0)
-lat_min = Dy.destination(point=les_centre, bearing=180)
-lon_max = Dx.destination(point=les_centre, bearing=270)
-lon_min = Dx.destination(point=les_centre, bearing=90)
-medium_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
-##large
-Dx = geopy.distance.distance(kilometers = 400)
-Dy = geopy.distance.distance(kilometers = 400)
-lat_max = Dy.destination(point=les_centre, bearing=0)
-lat_min = Dy.destination(point=les_centre, bearing=180)
-lon_max = Dx.destination(point=les_centre, bearing=270)
-lon_min = Dx.destination(point=les_centre, bearing=90)
-large_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
+# ##large
+# Dx = geopy.distance.distance(kilometers = 400)
+# Dy = geopy.distance.distance(kilometers = 400)
+# lat_max = Dy.destination(point=les_centre, bearing=0)
+# lat_min = Dy.destination(point=les_centre, bearing=180)
+# lon_max = Dx.destination(point=les_centre, bearing=270)
+# lon_min = Dx.destination(point=les_centre, bearing=90)
+# large_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
 
 
 
-small     = [12.39, -58.6, 14.16, -56.86]
-medium    = [11.47, -59.61, 15.067, -55.91]
-large     = [9.65, -61.5, 16.86, -54.01]
+small = [harm_srf_sml[exp].lat.min().values, harm_srf_sml[exp].lon.min().values,\
+          harm_srf_sml[exp].lat.max().values, harm_srf_sml[exp].lon.max().values]
+    
+medium = [harm_srf_med[exp].lat.min().values, harm_srf_med[exp].lon.min().values,\
+          harm_srf_med[exp].lat.max().values, harm_srf_med[exp].lon.max().values]
+
+# medium    = [11.47, -59.61, 15.067, -55.91]
+# large     = [10.5, -61, 20.3, -51]
+large = [harm_srf[exp].lat.min().values, harm_srf[exp].lon.min().values,\
+          harm_srf[exp].lat.max().values, harm_srf[exp].lon.max().values]
 
 
 plt.figure()
 # ax =ds_pr.isel(time=ii)[var].plot(vmin=0,vmax=1,\
 #                     cmap=plt.cm.Blues_r,x='lon',y='lat',\
 #                     subplot_kws=dict(projection=proj))
+    
+# ax =harm_srf_sml[exp].isel(time=ii)['pr'].plot(\
+#                     cmap=plt.cm.Blues_r,x='lon',y='lat',\
+#                     subplot_kws=dict(projection=proj))
+
+    
 ax = plt.axes(projection=proj)
-ax.add_feature(coast, lw=2, zorder=7)
+ax.add_feature(coast, lw=2, zorder=7,color='darkgreen',alpha=0.3)
 plt.xlim([ds_pr.lon[0,0].values,ds_pr.lon[0,-1].values])
 plt.ylim([ds_pr.lat[0,-1].values,ds_pr.lat[-1,-1].values])
 
 
 ## small domain
-ax.plot([small[1],small[3]],[small[0],small[0]],c='g',ls='-')
-ax.plot([small[1],small[3]],[small[2],small[2]],c='g',ls='-')
-ax.plot([small[1],small[1]],[small[0],small[2]],c='g',ls='-')
-ax.plot([small[3],small[3]],[small[0],small[2]],c='g',ls='-')
-## medium domain
-ax.plot([medium[1],medium[3]],[medium[0],medium[0]],c='b',ls='-')
-ax.plot([medium[1],medium[3]],[medium[2],medium[2]],c='b',ls='-')
-ax.plot([medium[1],medium[1]],[medium[0],medium[2]],c='b',ls='-')
-ax.plot([medium[3],medium[3]],[medium[0],medium[2]],c='b',ls='-')
-## large domain ocean 
-ax.plot([medium_ocean[1],medium_ocean[3]],[medium_ocean[0],medium_ocean[0]],c='b',ls='--')
-ax.plot([medium_ocean[1],medium_ocean[3]],[medium_ocean[2],medium_ocean[2]],c='b',ls='--')
-ax.plot([medium_ocean[1],medium_ocean[1]],[medium_ocean[0],medium_ocean[2]],c='b',ls='--')
-ax.plot([medium_ocean[3],medium_ocean[3]],[medium_ocean[0],medium_ocean[2]],c='b',ls='--')
+ax.plot([small[1],small[3]],[small[0],small[0]],c='r',ls='-')
+ax.plot([small[1],small[3]],[small[2],small[2]],c='r',ls='-')
+ax.plot([small[1],small[1]],[small[0],small[2]],c='r',ls='-')
+ax.plot([small[3],small[3]],[small[0],small[2]],c='r',ls='-')
+# ## medium domain
+# ax.plot([medium[1],medium[3]],[medium[0],medium[0]],c='r',ls='--')
+# ax.plot([medium[1],medium[3]],[medium[2],medium[2]],c='r',ls='--')
+# ax.plot([medium[1],medium[1]],[medium[0],medium[2]],c='r',ls='--')
+# ax.plot([medium[3],medium[3]],[medium[0],medium[2]],c='r',ls='--')
+# ## medium domain ocean 
+# ax.plot([medium_ocean[1],medium_ocean[3]],[medium_ocean[0],medium_ocean[0]],c='r',ls='--')
+# ax.plot([medium_ocean[1],medium_ocean[3]],[medium_ocean[2],medium_ocean[2]],c='r',ls='--')
+# ax.plot([medium_ocean[1],medium_ocean[1]],[medium_ocean[0],medium_ocean[2]],c='r',ls='--')
+# ax.plot([medium_ocean[3],medium_ocean[3]],[medium_ocean[0],medium_ocean[2]],c='r',ls='--')
 ## large domain
-ax.plot([large[1],large[3]],[large[0],large[0]],c='k',ls='-')
-ax.plot([large[1],large[3]],[large[2],large[2]],c='k',ls='-')
-ax.plot([large[1],large[1]],[large[0],large[2]],c='k',ls='-')
-ax.plot([large[3],large[3]],[large[0],large[2]],c='k',ls='-')
-## large domain ocean 
-ax.plot([large_ocean[1],large_ocean[3]],[large_ocean[0],large_ocean[0]],c='k',ls='--')
-ax.plot([large_ocean[1],large_ocean[3]],[large_ocean[2],large_ocean[2]],c='k',ls='--')
-ax.plot([large_ocean[1],large_ocean[1]],[large_ocean[0],large_ocean[2]],c='k',ls='--')
-ax.plot([large_ocean[3],large_ocean[3]],[large_ocean[0],large_ocean[2]],c='k',ls='--')
+ax.plot([large[1],large[3]],[large[0],large[0]],c='k',ls='-',lw=1)
+ax.plot([large[1],large[3]],[large[2],large[2]],c='k',ls='-',lw=1)
+ax.plot([large[1],large[1]],[large[0],large[2]],c='k',ls='-',lw=1)
+ax.plot([large[3],large[3]],[large[0],large[2]],c='k',ls='-',lw=1)
 
 gl = ax.gridlines(crs=proj, draw_labels=True)
 gl.xformatter = LONGITUDE_FORMATTER
@@ -1373,29 +1940,72 @@ gl.yformatter = LATITUDE_FORMATTER
 gl.xlabels_top = False
 gl.ylabels_right = False
 plt.suptitle(exp)
+         
+
+#%% snapshots of wind anomalies
+iz=1500
+it=79
+var='w'
+fig, axs = plt.subplots(1,2,figsize=(15,7))
+if var =='w':
+    vmin=-0.06
+elif var =='u':
+    vmin=-3.5
+for ide,exp in enumerate(exps):
+    harm3d_filter[exp][var+'_pf'].sel(z=iz,method='nearest')\
+        .isel(time=it).plot(cmap='jet',ax=axs[ide],vmin=vmin)
+
+fig, axs = plt.subplots(1,2,figsize=(15,7))
+if var =='w':
+    vmin=-0.15
+    vmax=0.3
+elif var =='u':
+    vmin=-3.5
+for ide,exp in enumerate(exps):
+    harm3d[exp][var+'a_p'].sel(z=iz,method='nearest')\
+        .isel(time=it).plot(cmap='jet',ax=axs[ide],vmin=vmin,vmax=vmax)
+# plt.figure()
+# harm3d[exp][var+'a'].sel(z=iz,method='nearest')\
+#     .isel(time=it).plot(cmap='jet')
 
 #%%cross section
-crossyz = harm3d[exp].sel(time=idtime).sel(x=152500,y=slice(65000,145000))
+exp = 'noHGTQS_'
+# exp = 'noHGTQS_noSHAL_'
+idtime= np.datetime64('2020-01-25T19')
+
+
+crossyz = harm3d[exp].sel(time=idtime).sel(x=170000,method='nearest').sel(y=slice(50000,225000))
+
+crossxz = harm3d[exp].sel(time=idtime).sel(y=84000,method='nearest').sel(x=slice(150000,300000))
 
 ###############
 ### caclculate tendency by differenciating the flux ###
 crossyz['v_tend']=crossyz['vw'].differentiate(coord='z')
+crossxz['u_tend']=crossxz['uw'].differentiate(coord='z')
 ###### check this function!! 
 ###############
 
 for section in ['xz','yz']:
     if section =='xz':
-        mask = np.nan_to_num(crossyz['cl'].where(crossyz['cl']>0.15).values)
+        mask = np.nan_to_num(crossxz['cl'].where(crossxz['cl']>0.5).values)
+        mask[mask > 0] = 3
+        kernel = np.ones((4,4))
+        C      = ndi.convolve(mask, kernel, mode='constant', cval=0)
+        outer  = np.where( (C>=3) & (C<=12 ), 1, 0)
 
-mask[mask > 0] = 3
-kernel = np.ones((4,4))
-C      = ndi.convolve(mask, kernel, mode='constant', cval=0)
-outer  = np.where( (C>=3) & (C<=12 ), 1, 0)
-# add variable cloud contour
-# works only for 1 time stamp 
-if section =='yz':
-    crossyz['cloud'] = (('z', 'y'), outer)
+        crossxz['cloud'] = (('z', 'x'), outer)
+    if section =='yz':        
+        mask = np.nan_to_num(crossyz['cl'].where(crossyz['cl']>0.5).values)
+        mask[mask > 0] = 3
+        kernel = np.ones((4,4))
+        C      = ndi.convolve(mask, kernel, mode='constant', cval=0)
+        outer  = np.where( (C>=3) & (C<=12 ), 1, 0)
+        
+        crossyz['cloud'] = (('z', 'y'), outer)
+        
 
+
+# plot YZ 
 plt.figure(figsize=(15,6))
 temp = crossyz.coarsen(y=1, boundary='trim').mean()
 temp = temp.coarsen(z=1, boundary="trim").mean()
@@ -1403,7 +2013,7 @@ temp = temp.interp(z=np.linspace(temp.z.min(),temp.z.max(), num=30))
 im_1a = crossyz['v_tend'].plot(x='y')
 im_1b = temp.plot.\
     streamplot('y','z','va_p','wa_p',hue='vw',vmin=-0.001,\
-                     density=[0.6, 0.6],\
+                     density=[0.4, 0.4],\
                     linewidth=3.5,arrowsize=4,\
                 arrowstyle='fancy',cmap='PiYG_r')
 
@@ -1413,12 +2023,37 @@ cbar = im_1a.colorbar
 cbar.remove()
 cbar = im_1b.colorbar
 cbar.remove()
-plt.ylim([0,3500])
+plt.ylim([0,4500])
 plt.tight_layout()
 
+# plot XZ 
+plt.figure(figsize=(15,6))
+temp = crossxz.coarsen(x=1, boundary='trim').mean()
+temp = temp.coarsen(z=1, boundary="trim").mean()
+temp = temp.interp(z=np.linspace(temp.z.min(),temp.z.max(), num=30))
+im_1a = crossxz['u_tend'].plot(x='x')
+im_1b = temp.plot.\
+    streamplot('x','z','ua_p','wa_p',hue='uw',vmin=-0.001,\
+                     density=[0.4, 0.4],\
+                    linewidth=3.5,arrowsize=4,\
+                arrowstyle='fancy',cmap='PiYG_r')
 
-#%% Winds only inside a cloud
-fig, axs = plt.subplots(1,3,figsize=(15,11))
+crossxz['cloud'].where(crossxz['cloud'] > 0).plot(cmap='binary',\
+                                add_colorbar=False,vmin=0,vmax=0.5)
+cbar = im_1a.colorbar
+cbar.remove()
+cbar = im_1b.colorbar
+cbar.remove()
+plt.ylim([0,4500])
+plt.tight_layout()
+
+#%% Variances profiles 
+
+#### Maybe plot the delta normalised by the control. 
+
+day = '2020'
+
+fig, axs = plt.subplots(1,4,figsize=(18,11))
 for ide, exp in enumerate(exps):
 # for ide, exp in enumerate(['noHGTQS_','noHGTQS_noSHAL_']):
     if exp == 'noHGTQS_':
@@ -1426,26 +2061,196 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab ='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab ='NoMom'
-    Sh_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<1500)&(harm3d[exp]['cl_top']>900))
-    Dp_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<3500)&(harm3d[exp]['cl_top']>2500))
-    Nc_pixels = harm3d[exp].where((harm3d[exp]['cl_top'].isnull())|(harm3d[exp]['cl_top']>6000))
-    Nc_pixels['count'] = ((harm3d[exp]['cl_top'].isnull())|(harm3d[exp]['cl_top']>6000)).sum(('x','y'))
+        lab ='UVmixOFF'
     
-    for idx,var in enumerate(['wa','tke','buoy']):
+    for idx,var in enumerate(['ua','va','wa','tke']):
         ### for each scene calculate mean flux in Sh (and Dp) pixels
         #   multiply by the fraction of Sh (and Dp) pixels
         #   average over time 
         
-        ## deep pixels 
-        Dp_pixels[var].mean(('x','y'))\
-            .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+'_Dp',lw=3,c=col[ide],ls='-')
+        if var == 'ua':
+            var_2 = 'u'
+        elif var == 'va':
+            var_2 = 'v'
+        elif var == 'wa':
+            var_2 = 'w'
+        elif var == 'hus':
+            var_2 = 'q'
+        elif var == 'ta':
+            var_2 = 't'
+        
+        if var == 'tke':
+            ## all pixels 
+            harm3d[exp][var].mean(('x','y'))\
+                .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                        label=lab,lw=2,c=col[ide],ls='-',alpha=0.7)
+            harm3d_filter[exp][var].mean(('x','y'))\
+                .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                        label=lab,lw=3,c=col[ide],ls=':')
+            
+        
+        else: 
+            ## delta variance 
+            if exp != 'noHGTQS_':
+                ## 2.5 km resolutio 
+                ((harm3d[exp][var_2+'_var'].sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
+                    harm3d['noHGTQS_'][var_2+'_var'].mean(('x','y','time')))\
+                    /harm3d['noHGTQS_'][var_2+'_var'].mean(('x','y','time')))\
+                    .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                    label=lab+' 2.5km',lw=2,c=col[ide],ls='-',alpha=0.7)
+                ## filtered
+                (((harm3d_filter[exp][var+'_pf']**2).sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
+                    (harm3d_filter['noHGTQS_'][var+'_pf']**2).mean(('x','y','time')))\
+                    /(harm3d_filter['noHGTQS_'][var+'_pf']**2).mean(('x','y','time')))\
+                    .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                    label=lab+' '+str(np.around(f_scale/1000,1))+'km',\
+                                        lw=3,c=col[ide],ls=':')        
+        
+        ## actual variance 
+        # ## 2.5 km resolutio 
+        # harm3d[exp][var_2+'_var'].sel(time=day).mean(('x','y','time'))\
+        #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+        #                     label=lab+' 2.5km',lw=2,c=col[ide],ls='-')
+        # ## filtered
+        # (harm3d_filter[exp][var+'_pf']**2).sel(time=day).mean(('x','y','time'))\
+        #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+        #                     label=lab+' '+str(np.around(f_scale/1000,1))+'km',\
+        #                         lw=2,c=col[ide],ls=':')
+
+
+        axs[idx].axvline(0,c='k',lw=0.5)
+        axs[idx].set_ylim([0,4000])
+        axs[idx].set_xlabel(r'$m^2\,s^{-2}$')
+
+        if var == 'ua':
+            # axs[idx].set_title('Zonal wind variance',fontsize=24)
+            axs[idx].set_title(r"u' $^2$ (UVmixOFF - ctrl)",fontsize=24)
+        elif var == 'va':
+            # axs[idx].set_title('Meridional wind variance',fontsize=24)
+            axs[idx].set_title(r"v' $^2$ (UVmixOFF - ctrl)",fontsize=24)
+        elif var == 'wa':
+            # axs[idx].set_title('Vertical velocity variance',fontsize=24)
+            axs[idx].set_title(r"w' $^2$ (UVmixOFF - ctrl)",fontsize=24)
+        elif var == 'hus':
+            axs[idx].set_title('Specific humidity variance',fontsize=24)
+        elif var == 'ta':
+            axs[idx].set_title('Temperature variance',fontsize=24)
+        elif var == 'tke':
+            axs[idx].set_title('Resolved TKE',fontsize=24)
+            axs[idx].set_xlabel(r'$m^{2}\,s^{-2}$')
+        elif var == 'buoy':
+            axs[idx].set_title('Buoyancy',fontsize=24)
+            axs[idx].set_xlabel(r'? $N$ ?')
+        axs[idx].spines['top'].set_visible(False)
+        axs[idx].spines['right'].set_visible(False)
+        
+# axs[1].set_xlim([-11,0])
+# axs[2].ticklabel_format(style='sci', scilimits=(0,0))
+# axs[0].set_xlim([-0.05,0.1])
+axs[1].get_yaxis().set_visible(False) 
+axs[2].get_yaxis().set_visible(False) 
+axs[3].get_yaxis().set_visible(False) 
+axs[0].legend(fontsize=18)
+plt.tight_layout()
+
+
+#%% Winds only inside a cloud
+pltday =False
+pltnight = False
+alltime = True
+fig, axs = plt.subplots(1,2,figsize=(12,11))
+for ide, exp in enumerate(exps):
+# for ide, exp in enumerate(['noHGTQS_','noHGTQS_noSHAL_']):
+    if exp == 'noHGTQS_':
+        lab ='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab ='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab ='UVmixOFF'
+        
+        
+    updr_piels = harm3d[exp].where(harm3d[exp]['wa']>=1)
+    dndr_piels = harm3d[exp].where(harm3d[exp]['wa']<=-1)
+    
+    
+    
+    Sh_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<1500)&(harm3d[exp]['cl_top']>900))
+    Dp_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<3500)&(harm3d[exp]['cl_top']>2500))
+    cl_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<4000)&(harm3d[exp]['cl_top']>200))
+    Nc_pixels = harm3d[exp].where((harm3d[exp]['cl_top'].isnull())|(harm3d[exp]['cl_top']>4000))
+    Nc_pixels['count'] = ((harm3d[exp]['cl_top'].isnull())|(harm3d[exp]['cl_top']>6000)).sum(('x','y'))
+    
+    clcore_piels = cl_pixels.where(cl_pixels['wa']>0)
+    rest_pixels = harm3d[exp].where((harm3d[exp]['cl_top'].isnull())|\
+                                    (harm3d[exp]['cl_top']>4000)|\
+                                        (harm3d[exp]['wa']<0))
+    
+    for idx,var in enumerate(['wa','buoy']):
+        ### for each scene calculate mean flux in Sh (and Dp) pixels
+        #   multiply by the fraction of Sh (and Dp) pixels
+        #   average over time 
+        
+        if pltnight:
+            plt.suptitle('Nighttime',fontsize=24)
+            if var =='tke':
+                ## all pixels 
+                harm3d[exp][var].where((harm2d[exp]['time.hour']>= 20) | (harm2d[exp]['time.hour']< 6)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+                        
+            if (var == 'buoy') or (var =='wa'):
+                clcore_piels[var].where((harm2d[exp]['time.hour']>= 20) | (harm2d[exp]['time.hour']< 6)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+            if var =='wa':
+                ## up and down pixels
+                Nc_pixels[var].where((harm2d[exp]['time.hour']>= 20) | (harm2d[exp]['time.hour']< 6)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            lw=3,c=col[ide],ls='--')
+        if pltday:
+            plt.suptitle('Day time',fontsize=24)
+            if var =='tke':
+                ## all pixels 
+                harm3d[exp][var].where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+                        
+            if (var == 'buoy') or (var =='wa'):
+            # if (var == 'buoy'):
+                clcore_piels[var].where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+            if var =='wa':
+                Nc_pixels[var].where((harm2d[exp]['time.hour']>= 6) & (harm2d[exp]['time.hour']< 20)).mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            lw=3,c=col[ide],ls='--')
+        if alltime:
+            if var =='tke':
+                ## all pixels 
+                harm3d[exp][var].mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+                        
+            if (var == 'buoy') or (var =='wa'):
+            # if (var == 'buoy'):
+                clcore_piels[var].mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            label=lab,lw=3,c=col[ide],ls='-')
+            if var =='wa':
+                rest_pixels[var].mean(('x','y'))\
+                    .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                            lw=3,c=col[ide],ls='--')
+            
+                
+        # ## deep pixels 
+        # Dp_pixels[var].mean(('x','y'))\
+        #     .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+        #                             label=lab+'_Dp',lw=3,c=col[ide],ls='-')
     
         ## shallow pixels 
-        Sh_pixels[var].mean(('x','y'))\
-            .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+'_Sh',lw=3,c=col[ide],ls='--')
+        # Sh_pixels[var].mean(('x','y'))\
+        #     .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+        #                             label=lab+'_Sh',lw=3,c=col[ide],ls='--')
         ## non-cloudy pixels 
         # Nc_pixels[var].mean(('x','y'))\
         #     .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
@@ -1464,7 +2269,7 @@ for ide, exp in enumerate(exps):
             axs[idx].set_xlabel(r'$m^{2}\,s^{-2}$')
         elif var == 'buoy':
             axs[idx].set_title('Buoyancy',fontsize=24)
-            axs[idx].set_xlabel(r'? $N$ ?')
+            axs[idx].set_xlabel(r'$N$ ')
         axs[idx].spines['top'].set_visible(False)
         axs[idx].spines['right'].set_visible(False)
         
@@ -1472,6 +2277,7 @@ for ide, exp in enumerate(exps):
 # axs[2].set_xlim([-3,0])
 # axs[0].set_xlim([-0.05,0.1])
 axs[1].get_yaxis().set_visible(False) 
+axs[1].ticklabel_format(style='sci', scilimits=(0,0))
 # axs[2].get_yaxis().set_visible(False) 
 axs[0].legend(fontsize=18)
 plt.tight_layout()
@@ -1485,7 +2291,7 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noSHAL_':
         lab ='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
-        lab ='NoMom'
+        lab ='UVmixOFF'
     Sh_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<1500)&(harm3d[exp]['cl_top']>900))
     Dp_pixels = harm3d[exp].where((harm3d[exp]['cl_top']<3500)&(harm3d[exp]['cl_top']>2500))
     Nc_pixels = harm3d[exp].where((harm3d[exp]['cl_top'].isnull())|(harm3d[exp]['cl_top']>6000))
@@ -1496,16 +2302,17 @@ for ide, exp in enumerate(exps):
         #   multiply by the fraction of Sh (and Dp) pixels
         #   average over time 
         
-        ## shallow pixels 
-        ((Sh_pixels[var+'w']+Sh_pixels[var+'_flx_param_tot']).mean(('x','y')) * Sh_pixels.count(('x','y'))['cl_top']\
-                                    /(len(harm3d[exp].x) * len(harm3d[exp].y)))\
-            .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+'_Sh',lw=3,c=col[ide],ls='-')
+        
         ## deep pixels 
         ((Dp_pixels[var+'w']+Dp_pixels[var+'_flx_param_tot']).mean(('x','y')) * Dp_pixels.count(('x','y'))['cl_top']\
                                     /(len(harm3d[exp].x) * len(harm3d[exp].y)))\
             .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+'_Dp',lw=3,c=col[ide],ls=':')
+                                    label=lab+'_Dp',lw=3,c=col[ide],ls='-')
+        ## shallow pixels 
+        ((Sh_pixels[var+'w']+Sh_pixels[var+'_flx_param_tot']).mean(('x','y')) * Sh_pixels.count(('x','y'))['cl_top']\
+                                    /(len(harm3d[exp].x) * len(harm3d[exp].y)))\
+            .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                    label=lab+'_Sh',lw=3,c=col[ide],ls='--')
         ## non-cloudy pixels 
         # ((Nc_pixels[var+'w']+Nc_pixels[var+'_flx_param_tot']).mean(('x','y')) * Nc_pixels['count']\
         #                             /(len(harm3d[exp].x) * len(harm3d[exp].y)))\
