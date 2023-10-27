@@ -94,7 +94,7 @@ plot=False
 apply_filter = False
 
 # exps = ['noHGTQS_','noHGTQS_noSHAL_']
-exps = ['noHGTQS_','noHGTQS_noUVmix_']
+exps = ['noHGTQS_','noHGTQS_noUVmix_','noHGTQS_noSHAL_']
 col=['k','r','g']
 # col=['k','r']
 sty=['--','-',':']
@@ -121,7 +121,7 @@ lon_min = Dx.destination(point=new_centre, bearing=90)
 medium_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
 #%%
 print("Reading ERA5.") 
-era5=xr.open_mfdataset(ifs_dir+'My_ds_ifs_ERA5.nc',chunks={'Date':-1})
+era5=xr.open_mfdataset(ifs_dir+'My_ds_ifs_ERA5.nc',chunks={'Date':24})
 era5['Date'] = era5.Date - np.timedelta64(4, 'h')
 era5.Date.attrs["units"] = "Local Time"
 
@@ -136,9 +136,11 @@ harm3d={}
 harm_srf={}
 harm_srf_sml = {}
 harm_srf_med  = {}
+filtered = {}
+spectral = {}
 for exp in exps:
     file2d = my_harm_dir+exp[:-1]+'/'+exp+month+'_avg'+str(domain_sml)+'*'+levels+'*.nc'
-    harm2d[exp] = xr.open_mfdataset(file2d, combine='by_coords',chunks={'time':-1})
+    harm2d[exp] = xr.open_mfdataset(file2d, combine='by_coords',chunks={'time':24})
     harm2d[exp]['z'] = np.sort(harm2d[exp]['z'].values)
     harm2d[exp] = harm2d[exp].sortby('z')
     
@@ -154,7 +156,7 @@ for exp in exps:
     
     ####################################
     file3d = my_harm_dir+exp[:-1]+'/'+exp+month+'_3d_'+str(domain_sml)+'*'+levels+'*.nc'
-    harm3d[exp] = xr.open_mfdataset(file3d, combine='by_coords',chunks={'time':-1})
+    harm3d[exp] = xr.open_mfdataset(file3d, combine='by_coords',chunks={'time':24})
     harm3d[exp] = harm3d[exp].drop_duplicates(dim="time", keep="first")
     ####################################    
     # convert model levels to height levels
@@ -170,7 +172,7 @@ for exp in exps:
     # read surface 2d fields
     # file_srf = my_harm_dir+exp[:-1]+'/'+exp+month+'_2d_'+str(domain_sml)+'.nc'
     file_srf = my_harm_dir+exp[:-1]+'/'+exp+month+'_2d_1100.nc'
-    harm_srf[exp] = xr.open_mfdataset(file_srf, combine='by_coords')
+    harm_srf[exp] = xr.open_mfdataset(file_srf, combine='by_coords',chunks={'time':24})
     harm_srf[exp]['time'] = np.sort(harm_srf[exp]['time'].values)
     # drop duplicate hour between the 2 months 
     harm_srf[exp] = harm_srf[exp].drop_duplicates(dim='time',keep='first')
@@ -198,19 +200,43 @@ for exp in exps:
         harm_srf_med[exp] = harm_srf_med[exp].drop(['time_bnds'])
         harm_srf[exp] = harm_srf[exp].drop(['time_bnds'])
     
+    ### import filtered fields 
+    filtered[exp] = xr.open_mfdataset(my_harm_dir+exp[:-1]+'/filtered_'+exp[:-1]+'.nc',chunks={'time':24})
+    spectral[exp] = xr.open_mfdataset(my_harm_dir+exp[:-1]+'/spectral_'+exp[:-1]+'.nc',chunks={'time':24})
+    
 #%% Import organisation metrics
 ds_org = {}
 for exp in exps:    
     fileorg = my_harm_dir+'df_metrics_'+exp[:-1]+'.h5'    
     ds_org[exp] = pd.read_hdf(fileorg)
-    ds_org[exp].index.names = ['time']
     ds_org[exp] = ds_org[exp].astype(np.float64)
     ds_org[exp] = ds_org[exp].to_xarray()
+    ds_org[exp] = ds_org[exp].rename({'index':'time'})
     ds_org[exp] = ds_org[exp].sel(time=slice(srt_time,end_time))
     # convert to local time
     ds_org[exp]['time'] = ds_org[exp]['time'] - np.timedelta64(4, 'h')
     ds_org[exp].time.attrs["units"] = "Local Time"
     
+    
+ds_org_4km = {}
+ds_org_div = {}
+ds_org_smoc_conv = {}
+ds_org_smoc_dive = {}
+for exp in exps:
+    fileorg = my_harm_dir+'df_metrics_cc_4km_'+exp[:-1]+'.nc'    
+    ds_org_4km[exp] = xr.open_mfdataset(fileorg, combine='by_coords')
+    ds_org_4km[exp]['time'] = ds_org[exp]['time']
+    ds_org_4km[exp] = ds_org_4km[exp].drop('index')
+    ds_org_4km[exp] = ds_org_4km[exp].interpolate_na('time')    
+    
+    fileorg_smoc_conv = my_harm_dir+exp[:-1]+'/'+exp[:-1]+'_smoc_conv_metrics_5klp.nc'
+    # fileorg_smoc_dive = my_harm_dir+exp[:-1]+'/'+exp[:-1]+'_smoc_dive_metrics_5klp.nc'
+    
+    ds_org_smoc_conv[exp] = xr.open_mfdataset(fileorg_smoc_conv, combine='by_coords')
+    ds_org_smoc_conv[exp] = ds_org_smoc_conv[exp].set_index(time='index')
+    
+    # ds_org_smoc_dive[exp] = xr.open_mfdataset(fileorg_smoc_dive, combine='by_coords')
+    # ds_org_smoc_dive[exp] = ds_org_smoc_dive[exp].set_index(time='index')
 #%%  Define Groups of organisation 
 time_g1={}
 time_g2={}
@@ -255,7 +281,6 @@ for exp in exps:
     time_g2[group][exp] = harm2d[exp].where((np.logical_not(harm2d[exp].time.\
                             isin(xr.concat((time_g1[group][exp],time_g3[group][exp])\
                                            ,'time')))).compute(),drop=True).time
-
 #%% calculated resolved fluxes
 for exp in exps:
     for var in ['ua','va','wa','hus','ta']:
@@ -298,15 +323,18 @@ for exp in exps:
             harm2d[exp]=ds
         elif id_ds==1:
             harm3d[exp]=ds
+            
+    ### Convergence and divergence ['dudx']+['dvdy']
+    harm3d[exp]['div']   = harm3d[exp]['ua_p'].differentiate('x')   + harm3d[exp]['va_p'].differentiate('y')
 #%% Cloud top height 
 # define cloud top in each pixel using Cloud Area Fraction (cl)
 var = 'cl'
-thres = 0.1
-for exp in exps:
+thres = 0.5     # /kg
+for exp in exps:  
     #height of zero cloud fraction after maximum
     zmax = harm3d[exp][var].sel(z=slice(0,5000)).idxmax('z')  # height of max cloud cover
     temp = harm3d[exp][var].sel(z=slice(0,5000)).where(harm3d[exp]['z']>=zmax)
-    harm3d[exp][var+'_top'] = temp.where(lambda x: x<thres).idxmax(dim='z') 
+    harm3d[exp][var+'_top'] = temp.where(lambda x: x>thres).idxmax(dim='z') 
     # exclude areas with no clouds (cloud top below 500 m)
     harm3d[exp][var+'_top'] = harm3d[exp][var+'_top'].where(harm3d[exp][var+'_top']>500)
     
@@ -326,26 +354,26 @@ for exp in exps:
         harm3d[exp]['ua_p']**2
         
     ### calculate cloud cover below 4km
-    harm3d[exp]['cc_4km']  = (harm3d[exp]['cl'].sel(z=slice(0,4000))>0.5).any(dim='z') *1
+    harm3d[exp]['cc_4km']  = (harm3d[exp]['cl'].sel(z=slice(0,4000))>thres).any(dim='z') *1
     harm2d[exp]['cc_4km'] = \
-    ((harm3d[exp]['cl'].sel(z=slice(0,4000))>0.5).any(dim='z').\
+    ((harm3d[exp]['cl'].sel(z=slice(0,4000))>thres).any(dim='z').\
     sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
         
     ### calculate cloud cover below 2.5km (this is to check with standard output of low cloud cover CLL)
-    harm3d[exp]['cc_2_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,2500))>0.5).any(dim='z') *1
+    harm3d[exp]['cc_2_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,2500))>thres).any(dim='z') *1
     harm2d[exp]['cc_2_5km'] = \
     ((harm3d[exp]['cl'].sel(z=slice(0,2500))>0.5).any(dim='z').\
     sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
 
     ### calculate cloud cover below 1.5km ()
-    harm3d[exp]['cc_1_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,1500))>0.5).any(dim='z') *1
+    harm3d[exp]['cc_1_5km']  = (harm3d[exp]['cl'].sel(z=slice(0,1500))>thres).any(dim='z') *1
     harm2d[exp]['cc_1_5km'] = \
-    ((harm3d[exp]['cl'].sel(z=slice(0,1500))>0.5).any(dim='z').\
+    ((harm3d[exp]['cl'].sel(z=slice(0,1500))>thres).any(dim='z').\
     sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
     ### calculate cloud cover below 1km ()
-    harm3d[exp]['cc_1km']  = (harm3d[exp]['cl'].sel(z=slice(0,1000))>0.5).any(dim='z') *1
+    harm3d[exp]['cc_1km']  = (harm3d[exp]['cl'].sel(z=slice(0,1000))>thres).any(dim='z') *1
     harm2d[exp]['cc_1km'] = \
-    ((harm3d[exp]['cl'].sel(z=slice(0,1000))>0.5).any(dim='z').\
+    ((harm3d[exp]['cl'].sel(z=slice(0,1000))>thres).any(dim='z').\
     sum(dim=('x','y'))/(len(harm3d[exp].x)*len(harm3d[exp].y)))
         
     ### calculate cloud cover between 1 and  4km
@@ -378,50 +406,16 @@ for exp in exps:
                                           harm3d[exp]['uflx_conv_moist'])**2 + \
                                          (harm3d[exp]['vflx_conv_dry']+\
                                           harm3d[exp]['vflx_conv_moist'])**2 )
-    
-#%% filter fields
 
-if apply_filter:
-    klps = [4]
-    xsize      =  200000 # m
-    harm3d_filter={}
-    for exp in exps:
-        for k in range(len(klps)):
-            print('Processing scale', k+1, '/', len(klps))
-            klp=klps[k]
-            #
-            if klp > 0:
-                f_scale = xsize/(klp*2)  # m
-            elif klp == 0:
-                f_scale = xsize
-            else: print('Warning: Cutoff wavenumber for lw-pass filter smaller than 0.')
-            
-            # Mask for low-pass filtering
-            circ_mask = np.zeros((harm3d[exp].x.size,harm3d[exp].x.size))
-            rad = getRad(circ_mask)
-            circ_mask[rad<=klp] = 1
-            
-            for var in ['ua','va','wa','hus','ta']:
-                 temp = lowPass(harm3d[exp][var+'_p'].values, circ_mask)
-                 temp_1 = lowPass(harm3d[exp][var].values, circ_mask) # here filter the actual wind fields
-                 
-                 if exp in harm3d_filter:
-                     harm3d_filter[exp] = harm3d_filter[exp].assign(xr.Dataset({var+'_pf': (('time','z','x','y'), temp)}))
-                     harm3d_filter[exp] = harm3d_filter[exp].assign(xr.Dataset({var+'_f': (('time','z','x','y'), temp_1)}))
-                 else:                 
-                     harm3d_filter[exp] = xr.Dataset({var+'_pf': (('time', 'z','x','y'), temp)})
-                     harm3d_filter[exp] = xr.Dataset({var+'_f': (('time', 'z','x','y'), temp_1)})
-    
-        harm3d_filter[exp] = harm3d_filter[exp].assign_coords(harm3d[exp].coords)
-        # harm3d_filter[exp] = harm3d_filter[exp].expand_dims(dim={"klp": len(klps)})
-        harm3d_filter[exp] = harm3d_filter[exp].assign_coords({"klp":klps})
-        ### Calculate TKE 
-        harm3d_filter[exp]['tke']=\
-            harm3d_filter[exp]['ua_pf']**2+\
-            harm3d_filter[exp]['ua_pf']**2+\
-            harm3d_filter[exp]['ua_pf']**2
-else: 
-    print('Not filtering fields.')
+#%% Identify 2D convergence objects 
+## use these objects as a cloud bask for cloudmetrics 
+threshold_div = 0.00007 
+div_mask = {}
+for exp in exps:
+    div_mask[exp] = (filtered[exp].where(filtered[exp]['div_f']>threshold_div,other=1)['div_f'])
+
+
+#%% filtered fields in separate script
 
 #%% #########   QUESTIONS   #########
 ###DOES THE DISTRIBUTION OF CLOUDS (CLOUD SIZE,UPDRAFTS) DETERMINES THE FLUXES? 
@@ -463,15 +457,17 @@ for ide, exp in enumerate(exps):
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
         lab='UVmixOFF'
-    for idx,var in enumerate(['mean_length_scale','num_objects','open_sky']):
+    for idx,var in enumerate(['cloud_fraction','num_objects','open_sky']):
         if var =='cloud_fraction':
             factor = 1
             title  = 'Cloud fraction'
             unit   = r'fraction '
+            lim =   [-0.5,0.5]
         elif var =='num_objects':
             factor = 1
             title  = 'Number of clouds'
             unit   = r'number #'
+            lim =   [-250,250]
         elif var =='iorg':
             factor = 1
             title  = r'$I_{org}$'
@@ -480,16 +476,22 @@ for ide, exp in enumerate(exps):
             factor = 1
             title  ='Mean length scale'
             unit   = r'km'
+            lim =   [-15,15]
         elif var == 'open_sky':
             factor = 1
             title  ='Open sky'
             unit   = r''
+            lim =   [-0.5,0.5]
         else:
             factor = 1
             title = var
         
-        (ds_org[exp][var]-ds_org['noHGTQS_'][var]).plot(\
-                    x='time',ls=sty[ide],ax=axs[idx],lw=1,c=col[ide],label=lab)
+        # (ds_org_4km[exp][var]-ds_org_4km['noHGTQS_'][var]).plot(\
+        #             x='time',ls=sty[ide],ax=axs[idx],lw=1,c=col[ide],label=lab)
+            
+        # (ds_org_4km[exp][var]-ds_org_4km['noHGTQS_'][var]).rolling(time=24).mean().plot(\
+        #             x='time',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
+        
             
         (ds_org[exp][var]-ds_org['noHGTQS_'][var]).rolling(time=24).mean().plot(\
                     x='time',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
@@ -503,8 +505,13 @@ for ide, exp in enumerate(exps):
         # axs[idx].set_xlim(0,23)
         axs[idx].set_title(title,fontsize =28)
         axs[idx].set_ylabel(unit)
+        axs[idx].set_ylim(lim)
+plt.suptitle('cloud mask from 0 to 4 km')
+plt.suptitle('cloud mask from 0 to 2.5 km')
 axs[0].set_xlabel('')
+axs[0].tick_params(labelbottom=False) 
 axs[1].set_xlabel('')
+axs[1].tick_params(labelbottom=False) 
 axs[2].set_xlabel('time')
 axs[0].legend(fontsize=21)   
 plt.tight_layout()
@@ -552,9 +559,9 @@ for ide, exp in enumerate(exps):
             ds_org[exp][var].groupby('time.hour').mean('time').plot(\
                         x='hour',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
         
-        # if var =='cloud_fraction':
-        #     # harm_srf[exp].cll.mean(dim=('x','y')).groupby('time.hour').mean('time')\
-        #     #     .plot(x='hour',ls=sty[ide],ax=axs[idx],lw=1,c=col[ide],label='low CC')
+        if var in list(harm_srf[exp]):
+            harm_srf[exp][var].mean(dim=('x','y')).groupby('time.hour').mean('time')\
+                .plot(x='hour',ls=sty[ide],ax=axs[idx],lw=3,c=col[ide],label=lab)
         #     harm3d[exp]['cl'].sel(z=slice(0,6000)).max('z').\
         #         mean(['x','y']).groupby('time.hour').mean('time').\
         #             plot(x='hour',c=col[ide],ls='--',lw=3,ax=axs[idx],label='0 - 6km')
@@ -608,6 +615,100 @@ axs.set_ylabel(r'fraction')
 axs.set_title(r'Cloud cover',fontsize=25)
 axs.set_xlabel(r'hour LT')
 plt.tight_layout()
+
+#%% cloud metrics on divergence 
+fig, axs = plt.subplots(4,1,figsize=(15,10))
+for ide, exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    for idx,var in enumerate(['cloud_fraction','open_sky','mean_length_scale','num_objects']):
+            
+        # ds_org_smoc_conv[exp][var].plot(\
+        #             x='time',ls='--',ax=axs[idx],lw=2,c=col[ide],label=lab)
+        axs[idx].axhline(ds_org_smoc_conv[exp][var].mean('time'),ls='--',lw=1,c=col[ide])
+        
+        
+        ds_org_smoc_conv[exp].interpolate_na('time').groupby('time.hour').mean()[var]\
+            .plot(x='hour',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
+        
+        # ds_org_smoc_conv[exp].interpolate_na('time').rolling(time=31).mean()[var].plot(\
+        #             x='time',ls='-',ax=axs[idx],lw=3,c=col[ide],label=lab)
+
+        # Fill the area between the vertical lines
+        axs[idx].axvspan(20, 23, alpha=0.1, color='grey')
+        axs[idx].axvspan(0, 6, alpha=0.1, color='grey')
+        axs[idx].set_xlim([0,23])
+        axs[idx].set_ylabel(var)
+        axs[idx].set_title(var,fontsize=25) 
+        axs[idx].set_xlabel('')
+        axs[idx].set_xticks(())
+axs[idx].set_xlabel(r'hour LT')
+axs[0].legend(fontsize=21)  
+plt.tight_layout()
+
+#%% boxplot for organisation metrics 
+
+fig, axs = plt.subplots(2,1,figsize=(13,7))
+for idx, smoc in enumerate([ds_org_smoc_conv,]):
+    if 'lab' in locals(): del lab
+    if 'x_ax' in locals(): del x_ax
+    iteration=-0.4                            
+    for var in ['cloud_fraction','open_sky',]:
+        iteration +=0.4
+        for exp in exps:
+            iteration +=0.3
+            axs[idx].boxplot(smoc[exp][var].values,\
+                        positions=[round(iteration,1)],\
+                whis=1.8,showfliers=False,showmeans=True,meanline=False,widths=0.25,\
+                    medianprops=dict(color="r", lw=2))  
+                
+            if 'lab' in locals():
+                lab=np.append(lab,max(exp[8:-1],'Control'))
+                x_ax=np.append(x_ax,iteration)
+            else:
+                lab = max(exp[8:-1],'Control')
+                x_ax=iteration
+                
+    axs[idx].set_xticklabels(lab, rotation=45 )
+    axs[idx].tick_params(axis='x', which='major', labelsize=16)
+axs[0].set_ylabel('Converging\n SMOCS')
+axs[1].set_ylabel('Diverging\n SMOCS')
+axs[1].set_xticklabels(lab, rotation=45 )
+axs[0].set_xticklabels('')
+axs[0].set_title('cloud_fraction,                      open_sky',fontsize=23)
+            
+            
+fig, axs = plt.subplots(2,1,figsize=(13,7))
+for idx, smoc in enumerate([ds_org_smoc_conv,]):
+    if 'lab' in locals(): del lab
+    if 'x_ax' in locals(): del x_ax
+    iteration=-0.4                            
+    for var in ['mean_length_scale','num_objects',]:
+        iteration +=0.4
+        for exp in exps:
+            iteration +=0.3
+            axs[idx].boxplot(smoc[exp][var].values,\
+                        positions=[round(iteration,1)],\
+                whis=1.8,showfliers=False,showmeans=True,meanline=False,widths=0.25,\
+                    medianprops=dict(color="r", lw=2))   
+            if 'lab' in locals():
+                lab=np.append(lab,max(exp[8:-1],'Control'))
+                x_ax=np.append(x_ax,iteration)
+            else:
+                lab = max(exp[8:-1],'Control')
+                x_ax=iteration
+                
+    axs[idx].set_xticklabels(lab, rotation=45 )
+    axs[idx].tick_params(axis='x', which='major', labelsize=16)
+axs[0].set_ylabel('Converging\n SMOCS')
+axs[1].set_ylabel('Diverging\n SMOCS')
+axs[1].set_xticklabels(lab, rotation=45 )
+axs[0].set_xticklabels('')
+axs[0].set_title('mean_length_scale,                      num_objects',fontsize=23)
 
 #%% Surface fluxes and precipitation 
 fig, axs = plt.subplots(3,1,figsize=(18,15))
@@ -1700,6 +1801,7 @@ plt.tight_layout()
 #%% rain distribution 
 var = 'rain'
 thres = +0.0001
+factor = 1000
 plt.figure()    
 for ide, exp in enumerate(exps):
     if exp == 'noHGTQS_':
@@ -1708,14 +1810,14 @@ for ide, exp in enumerate(exps):
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
         lab='UVmixOFF'
-    (harm3d[exp][var]*1000).where(harm3d[exp][var]>thres).isel(z=1)\
+    (harm3d[exp][var]*factor).where(harm3d[exp][var]>thres).isel(z=1)\
     .plot.hist(bins=500,color=col[ide],histtype=u'step', density=False)
     plt.axvline(harm3d[exp][var].where(harm3d[exp][var]>thres).isel(z=1)\
-                .quantile(0.5)*1000,c=col[ide],lw=3.5,ls=sty[ide],label=lab)
+                .quantile(0.5)*factor,c=col[ide],lw=3.5,ls=sty[ide],label=lab)
     plt.axvline(harm3d[exp][var].where(harm3d[exp][var]>thres).isel(z=1)\
-                .quantile(0.05)*1000,c=col[ide],lw=2.5,ls=sty[ide])
+                .quantile(0.05)*factor,c=col[ide],lw=2.5,ls=sty[ide])
     plt.axvline(harm3d[exp][var].where(harm3d[exp][var]>thres).isel(z=1)\
-                .quantile(0.95)*1000,c=col[ide],lw=2.5,ls=sty[ide])
+                .quantile(0.95)*factor,c=col[ide],lw=2.5,ls=sty[ide])
         
         # harm3d[exp][var].isel(z=1))>tresh).sum()
 plt.xlim([0.05,0.8])
@@ -1728,7 +1830,6 @@ plt.legend(fontsize=25)
 plt.tight_layout()
 
 #%% Define cloud base 
-
 # variable exists! import from 2d fields 
 
 #%% Temporal variability in cloud top 
@@ -1752,6 +1853,26 @@ plt.legend(fontsize=25)
 plt.title('Cloud top counts for Deeper and Shallower pixels',fontsize=22)
 plt.xlim([0,23])
 plt.tight_layout()  
+
+#%%
+################################################################
+## plot cloud time series as in DALES paper.
+## plot it as a difference to the control .
+################################################################
+var = 'cl_top'
+plt.figure(figsize=(13,9) )
+for ide, exp in enumerate(exps):
+    harm3d[exp][var].mean(dim=('x','y')).groupby('time.hour').mean()\
+        .plot(color=col[ide],label=lab,lw=3)
+    # ((harm3d[exp][var]<4000)&(harm3d[exp][var]>2500)).sum(dim=('x','y')).groupby('time.hour').mean()\
+    #         .plot(color=col[ide],label=lab+'_Dp',ls='--',lw=3)
+plt.ylabel(r'Cloud top')
+plt.legend(fontsize=25)
+plt.title('Diurnality of mean cloud top',fontsize=22)
+plt.xlim([0,23])
+plt.tight_layout()  
+
+
 #%%
 var = 'rain'
 plt.figure(figsize=(13,8) )
@@ -1781,7 +1902,7 @@ for ide, exp in enumerate(exps):
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
         lab='UVmixOFF'
-    harm3d[exp][var].plot.hist(bins=4,lw=3, color=col[ide],\
+    harm3d[exp][var].plot.hist(bins=15,lw=3, color=col[ide],\
                                histtype=u'step',label=lab, density=True)
 plt.ylabel(r'Distribution of CL top')
 plt.legend(fontsize=25)
@@ -1838,20 +1959,89 @@ plt.title('Difference between winds at 2 km and winds at 500m',fontsize=25)
 plt.legend(fontsize=25)
 plt.tight_layout()  
 
+#%% Convergence and divergence ['dudx']+['dvdy']
+klp = filtered[exp].klp[1]
+# it = filtered[exp].time[15]
+it= np.datetime64('2020-01-13T12')
+iz = 200
+var = 'div'
+# plt.figure(figsize=(13,5))
+# for ide, exp in enumerate(exps):
+#     filtered[exp][var+'_f'].var(('x','y')).sel(klp=klp).sel(z=iz,method='nearest').plot(c=col[ide],lw=3)
+#     plt.suptitle('variance of divergence')
 
-#%% Convergence and divergence 
+## fields of divergence
+fig, axs = plt.subplots(1,2,figsize=(19,7))
+for ide, exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    filtered[exp].sel(klp=klp,time=it).sel(z=iz,method='nearest')[var+'_f']\
+        .plot(ax=axs[ide],vmax=0.0003)
+    axs[ide].set_title(lab,fontsize=23)
+axs[1].set_ylabel('')
+axs[1].set_yticks([])
 
+fig, axs = plt.subplots(1,2,figsize=(19,7))
+for ide, exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    harm3d[exp][var].sel(time=it).sel(z=iz,method='nearest').\
+        plot(ax=axs[ide],vmax=0.0007)
+    axs[ide].set_title(lab,fontsize=23)
+axs[1].set_ylabel('')
+axs[1].set_yticks([])
 
+    
+# ## profiles of mean divergence
+# fig, axs = plt.subplots(2,1,figsize=(19,7))
+# for ide, exp in enumerate(exps):
+#     if exp == 'noHGTQS_':
+#         lab='Control'
+#     elif exp == 'noHGTQS_noSHAL_':
+#         lab='NoShal'
+#     elif exp == 'noHGTQS_noUVmix_':
+#         lab='UVmixOFF'
+#     filtered[exp][var+'_f'].mean(('x','y')).sel(klp=klp).\
+#         plot(ax=axs[ide],vmax=0.00005)
+#     axs[ide].set_title(lab,fontsize=23)
+#     axs[ide].set_ylim([0,6000])
+# axs[0].set_xlabel('')
+# axs[0].set_xticks([])
 
+    
+# ## profiles of mean divergence from non coarsened fields
+# fig, axs = plt.subplots(2,1,figsize=(19,7))
+# for ide, exp in enumerate(exps):
+#     if exp == 'noHGTQS_':
+#         lab='Control'
+#     elif exp == 'noHGTQS_noSHAL_':
+#         lab='NoShal'
+#     elif exp == 'noHGTQS_noUVmix_':
+#         lab='UVmixOFF'
+#     harm3d[exp][var].mean(('x','y')).\
+#         plot(x='time',ax=axs[ide])
+#     axs[ide].set_title(lab,fontsize=23)
+#     axs[ide].set_ylim([0,6000])
+# axs[0].set_xlabel('')
+# axs[0].set_xticks([])
 
 #%% aereal snapshot
-idtime= np.datetime64('2020-01-25T19')
-var= 'cc_2_5km'
+idtime= np.datetime64('2020-01-09T12')
+# idtime= filtered[exp].time[15]
+var= 'cc_1_5km'
 # var= 'cll'
 
 
 fig, axs = plt.subplots(1,2,figsize=(15,7))
-for ide,exp in enumerate(exps[:-1]):
+for ide,exp in enumerate(exps):
     if exp == 'noHGTQS_':
         lab='Control'
     elif exp == 'noHGTQS_noSHAL_':
@@ -1868,6 +2058,23 @@ plt.suptitle(idtime,fontsize =28)
 ###
 # plt.figure()
 # harm3d[exp].sel(time=idtime).vw.sel(z=slice(0,1500)).mean('z').plot()
+
+fig, axs = plt.subplots(1,2,figsize=(15,7))
+for ide,exp in enumerate(exps):
+    if exp == 'noHGTQS_':
+        lab='Control'
+    elif exp == 'noHGTQS_noSHAL_':
+        lab='NoShal'
+    elif exp == 'noHGTQS_noUVmix_':
+        lab='UVmixOFF'
+    div_mask[exp].sel(time=idtime,klp=klp).sel(z=iz,method='nearest').plot(ax=axs[ide],cmap='Blues')
+    # (harm_srf_sml[exp].sel(time=idtime)[var]).plot(ax=axs[ide],cmap='Blues_r',vmax=0.9)
+    # (harm_srf_sml[exp].sel(time=idtime)[var]>0.5).plot(ax=axs[ide],cmap='Blues_r')
+    axs[ide].set_title(lab,fontsize =28)
+axs[1].set_ylabel('')
+axs[1].set_yticks([])
+plt.suptitle(idtime,fontsize =28)
+
 
 #%% plot domains 
 ds_pr = xr.open_mfdataset('/Users/acmsavazzi/Documents/WORK/PhD_Year3/DATA/HARMONIE/noHGTQS/pr_his_BES_HA43h22tg3_clim_noHGTQS_1hr_202001110000-202001210000.nc')
