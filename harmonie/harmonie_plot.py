@@ -24,6 +24,7 @@ import geopy.distance
 from datetime import datetime, timedelta
 from netCDF4 import Dataset
 from scipy import ndimage as ndi
+
 my_source_dir = os.path.abspath('{}/../../../../My_source_codes')
 sys.path.append(my_source_dir)
 from My_thermo_fun import *
@@ -76,15 +77,15 @@ def convert_rain_intensity(intensity_kg_kg):
     intensity_mm_hour = intensity_kg_kg * density_water_vapor * conversion_factor
     return intensity_mm_hour
 #%% initial 
-dt          = 75                 # model  timestep [seconds]
-step        = 3600             # output timestep [seconds]
+dt          = 75               # model  timestep [seconds]
+step        = 3600           # output timestep [seconds]
 domain_name = 'BES'
 lat_select  = 13.2806    # HALO center 
 lon_select  = -57.7559   # HALO center 
 
-domain_sml  = 200            # km
+domain_sml  = 200           # km
 domain_med  = 400
-grid        = 2.5 # kmm
+grid        = 2.5 # km
 srt_time    = np.datetime64('2020-01-03T00:30')
 end_time    = np.datetime64('2020-01-29T23')
 
@@ -123,7 +124,7 @@ medium_ocean =[lat_min[0], lon_min[1], lat_max[0], lon_max[1]]
 print("Reading ERA5.") 
 era5=xr.open_mfdataset(ifs_dir+'My_ds_ifs_ERA5.nc',chunks={'Date':24})
 era5['Date'] = era5.Date - np.timedelta64(4, 'h')
-era5.Date.attrs["units"] = "Local Time"
+era5.Date.attrs["units"] = "Local_Time"
 
 #%% Import Harmonie
 ### Import Harmonie data
@@ -256,6 +257,20 @@ for exp in exps:
     time_g2[group][exp] = harm2d[exp].where((np.logical_not(harm2d[exp].time.\
                             isin(xr.concat((time_g1[group][exp],time_g3[group][exp])\
                                            ,'time')))).compute(),drop=True).time
+        
+### grouping by parameterised mom flux in control exp
+# group = 'tau_par'
+# mom_flux_q2 = harm3d[exps[0]]['tau_par'].sel(z=slice(0,1500)).chunk({'time': -1}).mean(('x','y','z')).quantile(0.5,dim=('time')).values
+# time_g1[group] = harm3d[exps[0]].where((harm3d[exps[0]]['tau_par'].\
+#                                         sel(z=slice(0,1500)).chunk({'time': -1}).\
+#                                             mean(('x','y','z'))\
+#                                         <= mom_flux_q2).compute(),drop=True).time
+# time_g2[group] = harm3d[exps[0]].where((harm3d[exps[0]]['tau_par'].\
+#                                         sel(z=slice(0,1500)).chunk({'time': -1}).\
+#                                             mean(('x','y','z'))\
+#                                         > mom_flux_q2).compute(),drop=True).time
+
+
 ### grouping by Iorg   
 group = 'iorg'
 time_g1[group]={}
@@ -390,6 +405,7 @@ for exp in exps:
     harm3d[exp]['thv']= calc_th(calc_Tv(harm3d[exp]['ta'],harm3d[exp]['p'],\
                        calc_rh(harm3d[exp]['p'],harm3d[exp]['hus'],harm3d[exp]['ta'])),\
                                harm3d[exp]['p'])
+    harm2d[exp]['thv'] = harm3d[exp]['thv'].mean(('x','y'))
     ################################  
     ## buoyancy
     harm3d[exp]['buoy'] = calc_buoy(harm3d[exp]['thv'],harm3d[exp]['thv'].mean(dim=('x','y')))
@@ -408,13 +424,40 @@ for exp in exps:
                                           harm3d[exp]['vflx_conv_moist'])**2 )
 
 #%% Identify 2D convergence objects 
-## use these objects as a cloud bask for cloudmetrics 
+## use these objects as a cloud mask for cloudmetrics 
 threshold_div = 0.00007 
 div_mask = {}
 for exp in exps:
+    filtered[exp].transpose('y','x','time','z','klp')
+    
     div_mask[exp] = (filtered[exp].where(filtered[exp]['div_f']>threshold_div,other=1)['div_f'])
+    
+    ### Calculate TKE 
+    filtered[exp]['tke']=\
+        filtered[exp]['u_pf']**2+\
+        filtered[exp]['u_pf']**2+\
+        filtered[exp]['u_pf']**2
+        
+        
+    ## Define divergence anomaly in the subcloud layer 
+    filtered[exp]['Dsc'] = filtered[exp]['div_f'].sel(z=slice(0,600)).mean('z') - \
+                filtered[exp]['div_f'].sel(z=slice(0,600)).mean('z').mean(('x','y'))
+    ## Define divergence anomaly in the cloud layer 
+    filtered[exp]['Dc']  = filtered[exp]['div_f'].sel(z=slice(900,1500)).mean('z') - \
+                filtered[exp]['div_f'].sel(z=slice(900,1500)).mean('z').mean(('x','y'))
+    ## identify dipols / smocs
+    filtered[exp]['smoc'] = (filtered[exp]['Dsc']/filtered[exp]['Dc'])<0
 
 
+#%% Save intermediate 
+    harm_srf_med_synopt[exp] = harm_srf_med[exp].mean(dim=('x','y')).chunk(dict(time=-1)).\
+                        interpolate_na(dim='time').rolling(time=32,center=True).mean()
+                        
+     
+                        
+    harm_srf_med_synopt[exp][['cape','pr']].to_netcdf(my_harm_dir+exp+'/'+exp[16:]+'_harm_srf_med_synopt.nc', compute=True)
+    #
+    harm_srf_sml[exp].to_netcdf(my_harm_dir+exp+'/'+exp[16:]+'harm_srf_sml.nc', compute=True)
 #%% filtered fields in separate script
 
 #%% #########   QUESTIONS   #########
@@ -711,7 +754,7 @@ axs[0].set_xticklabels('')
 axs[0].set_title('mean_length_scale,                      num_objects',fontsize=23)
 
 #%% Surface fluxes and precipitation 
-fig, axs = plt.subplots(3,1,figsize=(18,15))
+fig, axs = plt.subplots(2,1,figsize=(18,15))
 for ide, exp in enumerate(exps[:-1]):
     if exp == 'noHGTQS_':
         lab='Control'
@@ -719,7 +762,7 @@ for ide, exp in enumerate(exps[:-1]):
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
         lab='UVmixOFF'
-    for idx,var in enumerate(['cape','hfls','pr']):
+    for idx,var in enumerate(['cape','pr']):
     # for idx,var in enumerate(['ct','cb','cll']):
         
         if var =='pr':
@@ -778,6 +821,7 @@ axs[1].set_ylim(185,237)
 axs[2].set_ylim(9,62)
 axs[0].legend(fontsize=23)   
 plt.tight_layout()
+
 #%% PDF of vertical velocity 
 level = [0,100]
 group='rain'
@@ -1749,12 +1793,12 @@ for ide, exp in enumerate(exps):
                                                     c=col[ide],label=lab,ax=axs[1])
         
         # delta q
-        # ((harm3d[exp]['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
-        #     mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+        ((harm3d[exp]['hus'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['hus'].mean(dim=['x','y']))*100).\
+            mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
             
         # delta t
-        ((harm3d[exp]['ta'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['ta'].mean(dim=['x','y']))).\
-            mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
+        # ((harm3d[exp]['ta'].mean(dim=['x','y']).interp(z=harm3d['noHGTQS_'].z) - harm3d['noHGTQS_']['ta'].mean(dim=['x','y']))).\
+        #     mean('time').plot(y='z',ls=sty[ide],c=col[ide],lw=3,ax=axs[2])
         
     
     ## all hours
@@ -1892,7 +1936,7 @@ plt.title('Rain rate',fontsize=22)
 plt.xlim([0,23])
 plt.tight_layout()  
 
-#%%
+#%% Distribution of cloud top
 var = 'cl_top'
 plt.figure(figsize=(13,9) )
 for ide, exp in enumerate(exps):
@@ -1960,9 +2004,10 @@ plt.legend(fontsize=25)
 plt.tight_layout()  
 
 #%% Convergence and divergence ['dudx']+['dvdy']
+
 klp = filtered[exp].klp[1]
 # it = filtered[exp].time[15]
-it= np.datetime64('2020-01-13T12')
+it= np.datetime64('2020-01-08T12')
 iz = 200
 var = 'div'
 # plt.figure(figsize=(13,5))
@@ -2034,13 +2079,17 @@ axs[1].set_yticks([])
 # axs[0].set_xticks([])
 
 #%% aereal snapshot
-idtime= np.datetime64('2020-01-09T12')
+idtime= np.datetime64('2020-01-08T12')
 # idtime= filtered[exp].time[15]
-var= 'cc_1_5km'
-# var= 'cll'
+klp= 5
+var= 'cc_4km'
+# var= 'cl'
+var_2 = 'Dsc'
+
+ticklabels= np.array([50,100,150]) # in km 
 
 
-fig, axs = plt.subplots(1,2,figsize=(15,7))
+fig, axs = plt.subplots(2,3,figsize=(15,7))
 for ide,exp in enumerate(exps):
     if exp == 'noHGTQS_':
         lab='Control'
@@ -2048,32 +2097,41 @@ for ide,exp in enumerate(exps):
         lab='NoShal'
     elif exp == 'noHGTQS_noUVmix_':
         lab='UVmixOFF'
-    harm3d[exp].sel(time=idtime)[var].plot(ax=axs[ide],cmap='Blues_r')
+        
+    if ide == 2:
+        ##########
+        ## filtered has x and y axis inverted because in "main_scale_sep... .py" 
+        ## the dataframe is initialised wrongly.
+        ############
+        harm3d[exp].sel(time=idtime)[var].plot(x='x',ax=axs[0,ide],cmap='Blues_r',add_colorbar=True)
+        filtered[exp].sel(klp=klp,time=idtime)[var_2].plot(x='y',ax=axs[1,ide],vmin=-0.0002,add_colorbar=True)
+    else:
+        harm3d[exp].sel(time=idtime)[var].plot(x='x',ax=axs[0,ide],cmap='Blues_r',add_colorbar=False)
+        filtered[exp].sel(klp=klp,time=idtime)[var_2].plot(x='y',ax=axs[1,ide],vmin=-0.0002,add_colorbar=False)
+    
     # (harm_srf_sml[exp].sel(time=idtime)[var]).plot(ax=axs[ide],cmap='Blues_r',vmax=0.9)
     # (harm_srf_sml[exp].sel(time=idtime)[var]>0.5).plot(ax=axs[ide],cmap='Blues_r')
-    axs[ide].set_title(lab,fontsize =28)
-axs[1].set_ylabel('')
-axs[1].set_yticks([])
+    axs[0,ide].set_title(lab,fontsize =25)
+    ## x
+    axs[0,ide].set_xlabel('')
+    axs[0,ide].set_xticks([])
+    axs[1,ide].set_xlabel('km')
+    axs[1,ide].set_xticks(ticklabels*1000 +min(filtered[exp].y).values)
+    axs[1,ide].set_xticklabels(ticklabels)
+    ## y
+    axs[0,ide].set_ylabel('')
+    axs[1,ide].set_ylabel('')
+    axs[0,ide].set_yticks([])
+    axs[1,ide].set_yticks([])
+    axs[1,0].set_yticks(ticklabels*1000 +min(filtered[exp].x).values)
+    axs[1,0].set_yticklabels(ticklabels)
+    axs[0,0].set_yticks(ticklabels*1000 +min(harm3d[exp].y).values)
+    axs[0,0].set_yticklabels(ticklabels)
+
+axs[0,0].set_ylabel('km')
+axs[1,0].set_ylabel('km')
 plt.suptitle(idtime,fontsize =28)
 ###
-# plt.figure()
-# harm3d[exp].sel(time=idtime).vw.sel(z=slice(0,1500)).mean('z').plot()
-
-fig, axs = plt.subplots(1,2,figsize=(15,7))
-for ide,exp in enumerate(exps):
-    if exp == 'noHGTQS_':
-        lab='Control'
-    elif exp == 'noHGTQS_noSHAL_':
-        lab='NoShal'
-    elif exp == 'noHGTQS_noUVmix_':
-        lab='UVmixOFF'
-    div_mask[exp].sel(time=idtime,klp=klp).sel(z=iz,method='nearest').plot(ax=axs[ide],cmap='Blues')
-    # (harm_srf_sml[exp].sel(time=idtime)[var]).plot(ax=axs[ide],cmap='Blues_r',vmax=0.9)
-    # (harm_srf_sml[exp].sel(time=idtime)[var]>0.5).plot(ax=axs[ide],cmap='Blues_r')
-    axs[ide].set_title(lab,fontsize =28)
-axs[1].set_ylabel('')
-axs[1].set_yticks([])
-plt.suptitle(idtime,fontsize =28)
 
 
 #%% plot domains 
@@ -2259,7 +2317,9 @@ plt.tight_layout()
 #### Maybe plot the delta normalised by the control. 
 
 day = '2020'
-
+day = filtered[exp].time
+klp = 5
+f_scale = 100*domain_sml/(klp*2)
 fig, axs = plt.subplots(1,4,figsize=(18,11))
 for ide, exp in enumerate(exps):
 # for ide, exp in enumerate(['noHGTQS_','noHGTQS_noSHAL_']):
@@ -2270,74 +2330,85 @@ for ide, exp in enumerate(exps):
     elif exp == 'noHGTQS_noUVmix_':
         lab ='UVmixOFF'
     
-    for idx,var in enumerate(['ua','va','wa','tke']):
+    for idx,var in enumerate(['u','v','w','tke']):
         ### for each scene calculate mean flux in Sh (and Dp) pixels
         #   multiply by the fraction of Sh (and Dp) pixels
         #   average over time 
         
-        if var == 'ua':
-            var_2 = 'u'
-        elif var == 'va':
-            var_2 = 'v'
-        elif var == 'wa':
-            var_2 = 'w'
-        elif var == 'hus':
-            var_2 = 'q'
-        elif var == 'ta':
-            var_2 = 't'
-        
         if var == 'tke':
             ## all pixels 
-            harm3d[exp][var].mean(('x','y'))\
-                .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                        label=lab,lw=2,c=col[ide],ls='-',alpha=0.7)
-            harm3d_filter[exp][var].mean(('x','y'))\
-                .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+            filtered[exp][var].sel(time=day).mean(('x','y'))\
+                .mean('time').sel(klp=klp).isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
                                         label=lab,lw=3,c=col[ide],ls=':')
+            harm3d[exp][var].sel(time=day).mean(('x','y'))\
+                .mean('time').isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+                                        label=lab,lw=5,c=col[ide],ls='-',alpha=0.9)
+
             
         
         else: 
             ## delta variance 
             if exp != 'noHGTQS_':
-                ## 2.5 km resolutio 
-                ((harm3d[exp][var_2+'_var'].sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
-                    harm3d['noHGTQS_'][var_2+'_var'].mean(('x','y','time')))\
-                    /harm3d['noHGTQS_'][var_2+'_var'].mean(('x','y','time')))\
-                    .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+' 2.5km',lw=2,c=col[ide],ls='-',alpha=0.7)
+                ## normalised
                 ## filtered
-                (((harm3d_filter[exp][var+'_pf']**2).sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
-                    (harm3d_filter['noHGTQS_'][var+'_pf']**2).mean(('x','y','time')))\
-                    /(harm3d_filter['noHGTQS_'][var+'_pf']**2).mean(('x','y','time')))\
-                    .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-                                    label=lab+' '+str(np.around(f_scale/1000,1))+'km',\
-                                        lw=3,c=col[ide],ls=':')        
+                (((filtered[exp][var+'_pf']**2).sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
+                    (filtered['noHGTQS_'][var+'_pf']**2).sel(time=day).mean(('x','y','time')))\
+                    /(filtered['noHGTQS_'][var+'_pf']**2).sel(time=day).mean(('x','y','time')))\
+                    .sel(klp=klp).sel(z=slice(1,4000)).plot(y='z',ax=axs[idx],\
+                                    label=lab+' '+str(np.around(f_scale/100,1))+'km',\
+                                        lw=3,c=col[ide],ls=':')   
+                ## 2.5 km resolutio 
+                ((harm3d[exp][var+'_var'].sel(time=day).mean(('x','y','time')).interp(z=harm3d['noHGTQS_'].z)-\
+                    harm3d['noHGTQS_'][var+'_var'].sel(time=day).mean(('x','y','time')))\
+                    /harm3d['noHGTQS_'][var+'_var'].sel(time=day).mean(('x','y','time')))\
+                    .sel(z=slice(1,4000)).plot(y='z',ax=axs[idx],\
+                                    label=lab+' 2.5km',lw=3,c=col[ide],ls='-',alpha=0.9)
+               ## delta at each time 
+                # ## 2.5 km resolutio 
+                # ((harm3d[exp][var+'_var'].sel(time=day).interp(z=harm3d['noHGTQS_'].z)-\
+                #     harm3d['noHGTQS_'][var+'_var'].sel(time=day)).mean(('x','y','time')))\
+                #     .sel(z=slice(1,4000)).plot(y='z',ax=axs[idx],\
+                #                     label=lab+' 2.5km',lw=2,c=col[ide],ls='-',alpha=0.7)
+                # ## filtered variance - filtered variance of control 
+                # (((filtered[exp][var+'_pf']**2).sel(time=day).interp(z=harm3d['noHGTQS_'].z)-\
+                #     (filtered['noHGTQS_'][var+'_pf']**2).sel(time=day)).mean(('x','y','time')))\
+                #     .sel(klp=klp).sel(z=slice(1,4000)).plot(y='z',ax=axs[idx],\
+                #                     label=lab+' '+str(np.around(f_scale/100,1))+'km',\
+                #                         lw=3,c=col[ide],ls=':')  
+                ## filtered variance - 2.5km variance of control 
+                # (((filtered[exp][var+'_pf']**2).sel(time=day).interp(z=harm3d['noHGTQS_'].z)-\
+                #     (harm3d['noHGTQS_'][var+'_var'].sel(time=day))).mean(('x','y','time')))\
+                #     .sel(klp=klp).sel(z=slice(1,4000)).plot(y='z',ax=axs[idx],\
+                #                     label=lab+' '+str(np.around(f_scale/100,1))+'km',\
+                #                         lw=3,c=col[ide],ls=':')  
         
-        ## actual variance 
-        # ## 2.5 km resolutio 
-        # harm3d[exp][var_2+'_var'].sel(time=day).mean(('x','y','time'))\
-        #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-        #                     label=lab+' 2.5km',lw=2,c=col[ide],ls='-')
-        # ## filtered
-        # (harm3d_filter[exp][var+'_pf']**2).sel(time=day).mean(('x','y','time'))\
-        #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
-        #                     label=lab+' '+str(np.around(f_scale/1000,1))+'km',\
-        #                         lw=2,c=col[ide],ls=':')
+            ## actual variance 
+            # ## 2.5 km resolutio 
+            # harm3d[exp][var+'_var'].sel(time=day).mean(('x','y','time'))\
+            #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+            #                     label=lab+' 2.5km',lw=2,c=col[ide],ls='-')
+            # ## filtered
+            # (filtered[exp][var+'_pf']**2).sel(klp=klp,time=day).mean(('x','y','time'))\
+            #     .isel(z=slice(1,-1)).plot(y='z',ax=axs[idx],\
+            #                     label=lab+' '+str(np.around(f_scale/1000,1))+'km',\
+            #                         lw=2,c=col[ide],ls=':')
 
 
         axs[idx].axvline(0,c='k',lw=0.5)
         axs[idx].set_ylim([0,4000])
         axs[idx].set_xlabel(r'$m^2\,s^{-2}$')
+        axs[idx].set_xlabel(r'fraction')
 
-        if var == 'ua':
+        if var == 'u':
             # axs[idx].set_title('Zonal wind variance',fontsize=24)
-            axs[idx].set_title(r"u' $^2$ (UVmixOFF - ctrl)",fontsize=24)
-        elif var == 'va':
+            axs[idx].set_title(r" $\Delta$ u' $^2$",fontsize=24)
+        elif var == 'v':
             # axs[idx].set_title('Meridional wind variance',fontsize=24)
-            axs[idx].set_title(r"v' $^2$ (UVmixOFF - ctrl)",fontsize=24)
-        elif var == 'wa':
+            axs[idx].set_title(r"$\Delta$ v' $^2$",fontsize=24)
+        elif var == 'w':
             # axs[idx].set_title('Vertical velocity variance',fontsize=24)
-            axs[idx].set_title(r"w' $^2$ (UVmixOFF - ctrl)",fontsize=24)
+            axs[idx].set_title(r"$\Delta$ w' $^2$",fontsize=24)
+            axs[idx].set_xlim(left=0,right=4.5)
         elif var == 'hus':
             axs[idx].set_title('Specific humidity variance',fontsize=24)
         elif var == 'ta':
@@ -2345,6 +2416,7 @@ for ide, exp in enumerate(exps):
         elif var == 'tke':
             axs[idx].set_title('Resolved TKE',fontsize=24)
             axs[idx].set_xlabel(r'$m^{2}\,s^{-2}$')
+            axs[idx].set_xlim(left=0)
         elif var == 'buoy':
             axs[idx].set_title('Buoyancy',fontsize=24)
             axs[idx].set_xlabel(r'? $N$ ?')
