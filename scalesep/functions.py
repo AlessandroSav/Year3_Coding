@@ -24,8 +24,7 @@ def getRad(data):
    
     # create an array of integer radial distances from the center
     Y, X = np.ogrid[0:h, 0:w]
-    r    = np.hypot(X - wc, Y - hc).astype(np.int)
-    
+    r    = np.hypot(X - wc, Y - hc).astype(int)
     return r
 
 def lowPass(field, mask): 
