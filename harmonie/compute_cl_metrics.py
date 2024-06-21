@@ -54,7 +54,7 @@ my_harm_dir     = '/Users/acmsavazzi/Documents/WORK/PhD_Year3/DATA/HARMONIE/'
 #%% Import Harmonie
 if mask_on_goes16:
     print('Reading Goes16')
-    goes16 = xr.open_mfdataset(my_harm_dir+'Goes16_interp.nc',
+    goes16 = xr.open_mfdataset(my_harm_dir+'Goes16_interp_new.nc',
                                combine='by_coords',chunks={'time':48})
     
 else:
@@ -232,6 +232,6 @@ for exp in exps:
     elif mask_on_smoc_dive == True:
         df_metrics.to_netcdf(my_harm_dir+'smoc_dive_metrics_'+str(klp)+'klp_'+exp[:-1]+'.nc')
     elif mask_on_goes16 == True:
-        df_metrics.to_netcdf(my_harm_dir+'Goes16_metrics.nc')
+        df_metrics.to_netcdf(my_harm_dir+'Goes16_metrics_new.nc')
 #%%
 print('End.')
